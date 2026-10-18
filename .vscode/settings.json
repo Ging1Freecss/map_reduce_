@@ -1,0 +1,10 @@
+{
+  "protobuf-support.protols": {
+    "args": [
+      "-i",
+      "/home/hp/vcpkg/installed/x64-linux/include",
+      "-i",
+      "/home/hp/Projects/map_reduce/proto"
+    ]
+  }
+}

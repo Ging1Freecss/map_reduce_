@@ -1,0 +1,8 @@
+[config]
+include_paths = [
+    "/home/hp/Projects/map_reduce/proto",
+    "/home/hp/Projects/map_reduce",
+    "/home/hp/vcpkg/installed/x64-linux/include",
+    "build/vcpkg_installed/x64-linux/include",
+    "proto"
+]

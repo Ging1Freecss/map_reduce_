@@ -1,0 +1,10 @@
+build/
+compile_commands.json
+.cache/
+mr-tmp/
+mr-out-*
+mr-*-*
+vcpkg_installed/
+build/
+CMakeFiles/
+CMakeCache.txt
