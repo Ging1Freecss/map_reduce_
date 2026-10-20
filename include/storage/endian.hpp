@@ -1,4 +1,4 @@
-
+#pragma once
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -7,6 +7,8 @@
 #include <optional>
 #include <span>
 #include <vector>
+
+namespace mr {
 
 /*
     to maintain big endian across network,
@@ -74,3 +76,4 @@ public:
   // Explicit cloning helper if a copy is genuinely necessary
   [[nodiscard]] auto clone() const -> Packet;
 };
+} // namespace mr

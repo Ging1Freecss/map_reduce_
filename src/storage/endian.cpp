@@ -1,5 +1,7 @@
 #include "storage/endian.hpp"
+#include <cstdint>
 
+namespace mr {
 Packet::Packet(std::vector<std::byte> &&payload)
     : payload_(std::move(payload)) {}
 
@@ -14,7 +16,7 @@ void Packet::serialise_data(std::span<const std::byte> key,
   std::uint32_t value_size = value.size();
 
   // store length of key data + key data + lenth of value data + value data
-  std::uint32_t total_size =
+  std::uint64_t total_size =
       sizeof(std::uint32_t) + key_size + sizeof(std::uint32_t) + value_size;
 
   std::uint32_t little_endian_key_size = to_little_endian_32(key_size);
@@ -99,3 +101,4 @@ auto Packet::payload() const noexcept -> std::span<const std::byte> {
 auto Packet::size() const noexcept -> std::size_t { return payload_.size(); }
 
 auto Packet::clone() const -> Packet { return Packet(payload_); }
+} // namespace mr

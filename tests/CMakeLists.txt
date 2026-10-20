@@ -1,7 +1,8 @@
 find_package(GTest CONFIG REQUIRED)
 
 add_executable(storage_test
-    storage_test.cpp
+    storage/endian_test.cpp
+    storage/record_writer_test.cpp
 )
 
 target_link_libraries(storage_test
