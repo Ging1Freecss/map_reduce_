@@ -4,6 +4,7 @@ add_executable(storage_test
     storage/endian_test.cpp
     storage/record_writer_test.cpp
     storage/record_reader_test.cpp
+    storage/atomic_file_test.cpp
 )
 
 target_link_libraries(storage_test

@@ -7,6 +7,11 @@
 #include <string>
 
 namespace mr {
+
+/*
+    deserialise key and value pair one at a time using next_record()
+    we have call next_record() repeatedly to get next pair till EOF
+*/
 class RecordReader {
 private:
   std::reference_wrapper<std::istream> in_;

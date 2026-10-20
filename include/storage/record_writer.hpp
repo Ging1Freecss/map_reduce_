@@ -8,6 +8,9 @@
 namespace mr {
 
 /*
+
+ RecordWriter write record to out_, we use serialise key and value
+ to write it to buffer
  when we pass std::ofstream
  it has an internal buffer , so when buffer overflow it
  sends data to os, through syscall to kernal pages
