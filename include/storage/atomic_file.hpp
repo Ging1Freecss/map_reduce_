@@ -1,5 +1,6 @@
 #pragma once
 
+#include "storage/error.hpp"
 #include <cstddef>
 #include <expected>
 #include <filesystem>
@@ -18,6 +19,11 @@ namespace mr {
 
    - if exception occurs or a task fails before calling commit(), the destructor
     clean of staging file
+
+    how to use this:
+    - call AtomicFile with path
+    - stream the data into ofstream
+    - then commit
 */
 class AtomicFile {
 private:
@@ -28,7 +34,7 @@ private:
   bool committed_{false};
 
 public:
-  enum class ErrorState { IoError, RenameFailed };
+  using ErrorState = StorageError;
   AtomicFile(const std::filesystem::path &target_path,
              std::size_t buffer_size = 64 * 1024);
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "storage/endian.hpp"
+#include "storage/error.hpp"
 #include <expected>
 #include <functional>
 #include <istream>
@@ -17,12 +18,7 @@ private:
   std::reference_wrapper<std::istream> in_;
 
 public:
-  enum class ErrorState {
-    IoError,         // stream encountered an error
-    TruncatedHeader, // Stream ran out while reading 4-byte length prefix
-    TruncatedPayload // stream ran out before reading the promised key_len or
-                     // val_len
-  };
+  using ErrorState = StorageError;
 
   RecordReader(std::istream &in);
 

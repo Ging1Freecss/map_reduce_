@@ -1,8 +1,8 @@
 #pragma once
 #include "storage/endian.hpp"
+#include "storage/error.hpp"
 #include <expected>
 #include <functional>
-#include <optional>
 #include <ostream>
 #include <string_view>
 namespace mr {
@@ -11,6 +11,7 @@ namespace mr {
 
  RecordWriter write record to out_, we use serialise key and value
  to write it to buffer
+
  when we pass std::ofstream
  it has an internal buffer , so when buffer overflow it
  sends data to os, through syscall to kernal pages
@@ -22,7 +23,7 @@ private:
   std::reference_wrapper<std::ostream> out_;
 
 public:
-  enum class ErrorState { KeyOrValueLengthMaxExceeded, IoError };
+  using ErrorState = StorageError;
   explicit RecordWriter(std::ostream &out);
 
   auto write_record(std::string_view key, std::string_view value)
