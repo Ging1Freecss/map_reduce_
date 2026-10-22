@@ -15,5 +15,18 @@ target_link_libraries(storage_test
     GTest::gtest_main
 )
 
+add_executable(engine_test
+    engine/map_emit_context_test.cpp
+)
+
+target_link_libraries(engine_test
+    PRIVATE
+    engine
+    storage
+    GTest::gtest
+    GTest::gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(storage_test)
+gtest_discover_tests(engine_test)
