@@ -17,6 +17,7 @@ target_link_libraries(storage_test
 
 add_executable(engine_test
     engine/map_emit_context_test.cpp
+    engine/reduce_emit_context_test.cpp
 )
 
 target_link_libraries(engine_test
@@ -30,3 +31,13 @@ target_link_libraries(engine_test
 include(GoogleTest)
 gtest_discover_tests(storage_test)
 gtest_discover_tests(engine_test)
+
+add_executable(sequential_harness
+    sequential_harness.cpp
+)
+
+target_link_libraries(sequential_harness
+    PRIVATE
+    engine
+    storage
+)

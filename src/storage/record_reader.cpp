@@ -39,6 +39,12 @@ auto RecordReader::next_record(std::string &out_key, std::string &out_value)
   std::size_t key_length{from_little_endian_32(endian_key_length)};
 
   // read key data
+  /*
+    in both out_key and out_value we resize to 0 when length is 0 even
+    when not writing anything to it, as the user depend on if 
+    out_key is empty or not, if we dont resize it user will 
+    push the previous key value 
+  */
   out_key.resize(key_length);
   if (key_length > 0) {
 

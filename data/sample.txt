@@ -1,0 +1,6 @@
+apple banana apple
+banana cherry apple
+date fig grape
+apple banana
+hello world mapreduce
+hello mapreduce

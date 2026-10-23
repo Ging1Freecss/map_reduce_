@@ -108,6 +108,9 @@ public:
   }
 };
 
+static_assert(IsMapper<WordCountMapper, MapEmitContext<>>,
+              "the class is not a mapper");
+              
 template <typename Mapper = WordCountMapper,
           IsPartitioner Partitioner = HashPartitioner>
 inline auto
@@ -139,6 +142,4 @@ run_map_phase(std::size_t map_id, const std::filesystem::path &input_file,
   return ctx.commit();
 }
 
-static_assert(IsMapper<WordCountMapper, MapEmitContext<>>,
-              "the class is not a mapper");
 } // namespace mr
