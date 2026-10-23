@@ -22,7 +22,6 @@ add_executable(engine_test
 
 target_link_libraries(engine_test
     PRIVATE
-    engine
     storage
     GTest::gtest
     GTest::gtest_main
@@ -38,6 +37,5 @@ add_executable(sequential_harness
 
 target_link_libraries(sequential_harness
     PRIVATE
-    engine
     storage
 )

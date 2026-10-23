@@ -16,7 +16,7 @@ add_subdirectory(proto)
 add_subdirectory(server)
 add_subdirectory(client)
 add_subdirectory(src/storage)
-add_subdirectory(src/engine)
+
 
 enable_testing()
 add_subdirectory(tests)
