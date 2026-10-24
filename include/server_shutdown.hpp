@@ -1,5 +1,6 @@
 #pragma once
 
+#include <agrpc/grpc_context.hpp>
 #include <agrpc/grpc_executor.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <grpcpp/server.h>
@@ -11,7 +12,7 @@
 namespace helper {
 // Helper to cleanly shut down a gRPC server asynchronously without deadlock
 struct ServerShutdown {
-  ServerShutdown(grpc::Server &server, agrpc::GrpcExecutor &grpc_context)
+  ServerShutdown(grpc::Server &server, agrpc::GrpcContext &grpc_context)
       : server_(server), signals_(grpc_context, SIGINT, SIGTERM) {
     signals_.async_wait(
         [this](const boost::system::error_code &ec, int /*signal_number*/) {
