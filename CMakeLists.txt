@@ -14,6 +14,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 
 add_subdirectory(proto)
 add_subdirectory(server)
+add_subdirectory(coordinator)
 add_subdirectory(client)
 add_subdirectory(src/storage)
 

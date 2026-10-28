@@ -11,6 +11,8 @@ asio_grpc_protobuf_generate(
     PROTOS
     helloworld.proto
     mapreduce.proto
+    shuffle.proto
+    mr_coordination.proto
 )
 
 target_link_libraries(proto_lib

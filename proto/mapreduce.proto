@@ -1,6 +1,8 @@
 
 syntax = "proto3";
 
+package mr_proto;
+
 enum TaskType {
   // coordinator tells the worker that tasks are in-progress
   // but phase barrier isn't reached yet , sleep and poll again

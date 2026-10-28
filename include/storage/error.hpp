@@ -9,7 +9,8 @@ enum class StorageError {
   RenameFailed,
   KeyOrValueLengthMaxExceeded,
   TruncatedHeader,
-  TruncatedPayload
+  TruncatedPayload,
+  SplitQuotaEnd,
 };
 
 constexpr auto to_string(StorageError err) noexcept -> std::string_view {
@@ -24,6 +25,9 @@ constexpr auto to_string(StorageError err) noexcept -> std::string_view {
     return "Truncated record header";
   case StorageError::TruncatedPayload:
     return "Truncated record payload";
+
+  case StorageError::SplitQuotaEnd:
+    return "Split reader has read the target bytes";
   }
   return "Unknown storage error";
 }

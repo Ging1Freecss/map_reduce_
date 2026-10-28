@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package ww;
+
+// Reduce worker asks Map worker for an intermediate partition file
+message PartitionRequest {
+  string partition_filename = 1; // e.g., "mr-0_1.data"
+}
+
+// Streamed intermediate key-value bytes
+message PartitionChunk {
+  bytes payload = 1; // 64 KB slice of intermediate partition
+}
+
+// Internal service hosted by every Worker node
+service WorkerShuffleService {
+  // P2P Data Streaming (Map Worker -> Reduce Worker)
+  rpc FetchPartition(PartitionRequest) returns (stream PartitionChunk);
+}

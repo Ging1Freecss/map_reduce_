@@ -6,6 +6,7 @@ add_executable(storage_test
     storage/record_reader_test.cpp
     storage/atomic_file_test.cpp
     storage/staged_record_writer_test.cpp
+    storage/split_reader_test.cpp
 )
 
 target_link_libraries(storage_test

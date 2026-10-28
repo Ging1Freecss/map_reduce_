@@ -2,6 +2,7 @@
 
 #include <agrpc/grpc_context.hpp>
 #include <agrpc/grpc_executor.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <grpcpp/server.h>
 
@@ -12,8 +13,11 @@
 namespace helper {
 // Helper to cleanly shut down a gRPC server asynchronously without deadlock
 struct ServerShutdown {
-  ServerShutdown(grpc::Server &server, agrpc::GrpcContext &grpc_context)
-      : server_(server), signals_(grpc_context, SIGINT, SIGTERM) {
+  ServerShutdown(grpc::Server &server, agrpc::GrpcContext &grpc_context,
+                 boost::asio::io_context *io_context = nullptr)
+      : server_(server),
+        signals_(grpc_context, SIGINT, SIGTERM),
+        io_context_(io_context) {
     signals_.async_wait(
         [this](const boost::system::error_code &ec, int /*signal_number*/) {
           if (ec != boost::asio::error::operation_aborted) {
@@ -28,6 +32,9 @@ struct ServerShutdown {
       shutdown_thread_ = std::thread([this] {
         signals_.cancel();
         server_.Shutdown();
+        if (io_context_) {
+          io_context_->stop();
+        }
       });
     }
   }
@@ -41,6 +48,7 @@ struct ServerShutdown {
 private:
   grpc::Server &server_;
   boost::asio::basic_signal_set<agrpc::GrpcExecutor> signals_;
+  boost::asio::io_context *io_context_{nullptr};
   std::atomic<bool> is_shutdown_{false};
   std::thread shutdown_thread_;
 };

@@ -3,15 +3,15 @@
 #include <iostream>
 #include <string>
 
-int main(int argc, const char** argv) {
-    const std::string port = (argc >= 2) ? argv[1] : "50051";
-    const std::string name = (argc >= 3) ? argv[2] : "World";
-    const std::string host = "localhost:" + port;
+int main(int argc, const char **argv) {
+  const std::string port = (argc >= 2) ? argv[1] : "50051";
+  const std::string name = (argc >= 3) ? argv[2] : "World";
+  const std::string host = "localhost:" + port;
 
-    GreeterClient client{host};
+  GreeterClient client{host};
 
-    std::string reply;
-    const bool ok = client.say_hello(name, reply);
+  std::string reply;
+  client.test_client_mr();
 
-    return ok ? 0 : 1;
+  return 0;
 }

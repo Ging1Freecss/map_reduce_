@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package wc;
+
+enum TaskType {
+  WAIT = 0;     // no tasks ready, worker sleeps and re-polls in fix interval
+  MAP = 1;      // execute map task
+  REDUCE = 2;   // execute reduce task
+  SHUTDOWN = 3; // everything completed, worker exits
+}
+
+// TASK SCHEDULING AND POLLING MESSAGES
+
+message PollRequest { string worker_id = 1; }
+
+message TaskAssignment {
+  TaskType type = 1;
+  int64 task_id = 2;
+  int64 generation_id = 3; // lease fencing token
+
+  // map task fields
+  string input_file = 4;
+  uint64 offset = 5;
+  uint64 length = 6;
+  int32 num_reduce_tasks = 7;
+
+  // reduce task fields
+  // list of p2p network URL (e.g., "10.0.0.1:50052/mr-0_0.data")
+  int32 num_map_tasks = 8;
+  repeated string intermediate_paths = 9;
+}
+
+// TASK COMPLETION AND COMMIT MESSAGES
+message CompleteRequest {
+  int64 task_id = 1;
+  int64 generation_id = 2;
+  TaskType type = 3;
+
+  // for map tasks : list of advertised p2p uri's
+  // reduce tasks : path of final committed output file
+  repeated string output_paths = 4;
+}
+
+message CompleteReply { bool accepted = 1; }
+
+// SHUFFLE FAULT ESCALATION MESSAGES
+message ShuffleErrorReport {
+  int64 generation_id = 1;
+  int64 reduce_task_id = 2;
+  string missing_path = 3; // e.g., "10.0.0.1:50052/mr-0_0.data"
+  int64 failed_map_task_id = 4;
+  string error_message = 5;
+}
+
+message ShuffleErrorReply { bool acknowledged = 1; }
+
+// COORDINATOR INPUT SPLIT STREAMING MESSAGES
+message SplitDataRequest {
+  int64 task_id = 1;
+  int64 generation_id = 2;
+  string input_file = 3;
+  uint64 offset = 4;
+  uint64 length = 5;
+}
+
+message SplitDataChunk {
+  bytes payload = 1; // 64kb slice
+}
+
+// HEARTBEAT TO CHECK IF WORKER IS ALIVE
+message HeartBeatRequest {
+  string worker_id = 1;
+  int64 task_id = 2;
+  // lease token the worker have
+  // important, if coordinator last receive heartbeat is 10sec ago
+  // marks the task timeout, increments generation_id
+  // assign the task to another worker that is pulling for task
+  // if previous worker unfreeze and ca calls CompleteTask(generation_id)
+  // the coordinated reject the commit
+  // worker A discards its partial files and goes back to polling
+  int64 generation_id = 3;
+}
+
+message HeartBeatReply {
+  bool acknowledged = 1; // True if coordinator accepts the heartbeat
+  // True if coordinator expired the lease and reassigned the task
+  bool abort_task = 2;
+}
+
+// COORDINATOR SERVICE INTERFACE
+// in all cases here worker is the client and coordinator is the server
+service MapReduceService {
+  // Scheduling & Heartbeats
+
+  // worker poll coordinator for task
+  rpc PollTask(PollRequest) returns (TaskAssignment);
+
+  // worker send heartbeats which is updated in
+  // coordinator which record heartbeat last send
+  // periodically coordinator will check the last send
+  // heartbeat
+  rpc Heartbeat(HeartBeatRequest) returns (HeartBeatReply);
+  rpc CompleteTask(CompleteRequest) returns (CompleteReply);
+  rpc ReportShuffleError(ShuffleErrorReport) returns (ShuffleErrorReply);
+  // Input Data Streaming (Coordinator -> Map Worker)
+  rpc FetchInputSplit(SplitDataRequest) returns (stream SplitDataChunk);
+}
