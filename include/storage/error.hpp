@@ -32,4 +32,9 @@ constexpr auto to_string(StorageError err) noexcept -> std::string_view {
   return "Unknown storage error";
 }
 
+constexpr auto storage_erro_to_string(StorageError err) noexcept
+    -> std::string_view {
+  return to_string(err);
+}
+
 } // namespace mr

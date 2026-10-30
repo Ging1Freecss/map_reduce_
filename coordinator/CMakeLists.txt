@@ -9,6 +9,7 @@ add_executable(coordinator
 target_link_libraries(coordinator
     PRIVATE
     proto_lib
+    storage
     asio-grpc::asio-grpc
     Boost::asio
 )

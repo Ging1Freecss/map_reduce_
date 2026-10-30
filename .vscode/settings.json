@@ -6,5 +6,13 @@
       "-i",
       "/home/hp/Projects/map_reduce/proto"
     ]
-  }
+  },
+  "files.autoSave": "onFocusChange",
+  "clangd.arguments": [
+    "-j=8",
+    "--background-index",
+    "--background-index-priority=low",
+    "--pch-storage=memory"
+  ],
+  "cmake.parallelJobs": 8
 }

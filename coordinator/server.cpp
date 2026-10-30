@@ -88,6 +88,30 @@ auto CoordinateServer::handle_poll_task(PollTaskRPC &rpc,
   co_await rpc.finish(response, grpc::Status::OK);
 }
 
+auto CoordinateServer::handle_heart_beat(HeartBeatRPC &rpc,
+                                         wc::HeartBeatRequest &request)
+    -> boost::asio::awaitable<void> {
+  wc::HeartBeatReply response;
+  response.set_acknowledged(true);
+  co_await rpc.finish(response, grpc::Status::OK);
+}
+
+auto CoordinateServer::handle_complete_task(CompleteTaskRPC &rpc,
+                                            wc::CompleteRequest &request)
+    -> boost::asio::awaitable<void> {
+  wc::CompleteReply response;
+  response.set_accepted(true);
+  co_await rpc.finish(response, grpc::Status::OK);
+}
+
+auto CoordinateServer::handle_report_shuffle_error(
+    ReportShuffleErrorRPC &rpc, wc::ShuffleErrorReport &request)
+    -> boost::asio::awaitable<void> {
+  wc::ShuffleErrorReply response;
+  response.set_acknowledged(true);
+  co_await rpc.finish(response, grpc::Status::OK);
+}
+
 void CoordinateServer::run() { agrpc::run(*grpc_context_, *io_context_); }
 void CoordinateServer::stop() {
   if (server_shutdown_) {

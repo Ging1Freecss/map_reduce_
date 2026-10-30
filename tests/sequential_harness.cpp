@@ -1,17 +1,20 @@
 #include "engine/sequential_harness.hpp"
+#include "storage/error.hpp"
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
 
 void print_usage(const char *prog) {
-  std::cout << "Usage: " << prog << " [options] <input_file>\n"
-            << "Options:\n"
-            << "  --reducers, -r <N>   Number of reduce partitions (default: 4)\n"
-            << "  --workdir,  -w <dir> Staging directory for intermediate and output files (default: ./mr_output)\n"
-            << "  --help,     -h       Print this help message\n\n"
-            << "Example:\n"
-            << "  " << prog << " data/sample.txt -r 4 -w ./mr_output\n";
+  std::cout
+      << "Usage: " << prog << " [options] <input_file>\n"
+      << "Options:\n"
+      << "  --reducers, -r <N>   Number of reduce partitions (default: 4)\n"
+      << "  --workdir,  -w <dir> Staging directory for intermediate and output "
+         "files (default: ./mr_output)\n"
+      << "  --help,     -h       Print this help message\n\n"
+      << "Example:\n"
+      << "  " << prog << " data/sample.txt -r 4 -w ./mr_output\n";
 }
 
 int main(int argc, char *argv[]) {
@@ -60,18 +63,22 @@ int main(int argc, char *argv[]) {
 
   auto res = mr::run_sequential_map_reduce(input_file, work_dir, num_reducers);
   if (!res) {
-    std::cerr << "MapReduce failed with error: " << mr::to_string(res.error()) << "\n";
+    std::cerr << "MapReduce failed with error: "
+              << mr::storage_erro_to_string(res.error()) << "\n";
     return 1;
   }
 
   auto end = std::chrono::steady_clock::now();
-  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+  auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+          .count();
 
   std::cout << "SUCCESS: Pipeline completed in " << elapsed_ms << " ms\n"
             << "Intermediate files: " << work_dir << "/mr-0_<r>.data\n"
             << "Output partitions:  " << work_dir << "/mr-out-<r>\n\n"
             << "To generate golden reference:\n"
-            << "  cat " << work_dir << "/mr-out-* | sort -k1,1 > golden_reference.txt\n"
+            << "  cat " << work_dir
+            << "/mr-out-* | sort -k1,1 > golden_reference.txt\n"
             << "========================================================\n";
 
   return 0;
