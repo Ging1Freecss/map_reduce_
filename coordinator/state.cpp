@@ -14,19 +14,19 @@ namespace mr {
 // ============================================================================
 /**
  * @brief Initializes the Coordinator state machine and sets up task catalogs.
- *
- * Execution Steps:
- * 1. Sets initial phase to CONFIGURE and stores job parameters.
- * 2. Invokes generate_text_splits() to partition the master input file into
- *    line-aligned byte ranges (target ~64 MB each) without cutting words.
- * 3. Populates the map_tasks catalog with IDLE tasks mapped 1:1 to input
- * splits.
- * 4. Populates the reduce_tasks catalog with IDLE tasks (R partitions).
- * 5. Transitions cluster phase to MAP to begin accepting worker PollTask RPCs.
- *
- * @param input_path          Path to master raw text input file on Coordinator.
- * @param reduce_partition    Number of reduce partitions (R).
- * @param target_split_bytes  Target split size in bytes (defaults to 64 MB).
+
+  Execution Steps:
+  1. Sets initial phase to CONFIGURE and stores job parameters.
+  2. Invokes generate_text_splits() to partition the master input file into
+     line-aligned byte ranges (target ~64 MB each) without cutting words.
+  3. Populates the map_tasks catalog with IDLE tasks mapped 1:1 to input
+  splits.
+  4. Populates the reduce_tasks catalog with IDLE tasks (R partitions).
+  5. Transitions cluster phase to MAP to begin accepting worker PollTask RPCs.
+
+  @param input_path          Path to master raw text input file on Coordinator.
+  @param reduce_partition    Number of reduce partitions (R).
+  @param target_split_bytes  Target split size in bytes (defaults to 64 MB).
  */
 CoordinatorState::CoordinatorState(std::filesystem::path input_path,
                                    std::size_t reduce_partition,
@@ -80,9 +80,9 @@ CoordinatorState::CoordinatorState(std::filesystem::path input_path,
 
   REDUCE Phase:
     return the first IDLE Reduce task.
- * @param worker_id Unique identifier of the polling worker.
- * @return wc::TaskAssignment Protobuf response containing assigned work or
- * directive.
+  @param worker_id Unique identifier of the polling worker.
+  @return wc::TaskAssignment Protobuf response containing assigned work or
+    directive.
  */
 auto CoordinatorState::DistributeTaskToPollingWorker(std::string worker_id)
     -> wc::TaskAssignment {

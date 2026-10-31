@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <vector>
 namespace mr {
 enum class Phase { CONFIGURE, MAP, REDUCE, SHUFFLEFIX, DONE };
@@ -65,7 +66,7 @@ struct ReduceTask {
   std::string output_path;
 };
 
-class CoordinatorState {
+class CoordinatorState : public std::enable_shared_from_this<CoordinatorState> {
 private:
   std::vector<MapTask> map_tasks;
   std::vector<ReduceTask> reduce_tasks;
@@ -76,10 +77,12 @@ private:
 public:
   JobConfiguration job_conf;
 
+private:
   CoordinatorState(std::filesystem::path input_path,
                    std::size_t reduce_partition,
                    std::uint64_t target_split_bytes = 64 * 1024 * 1024);
 
+public:
   auto DistributeTaskToPollingWorker(std::string worker_id)
       -> wc::TaskAssignment;
 
@@ -101,5 +104,17 @@ public:
   auto CheckIfReducePhaseCompleted() -> bool;
 
   void CheckForInactiveWorker();
+
+  static std::shared_ptr<CoordinatorState>
+  create(std::filesystem::path input_path, std::size_t reduce_partition,
+         std::uint64_t target_split_bytes = 64 * 1024 * 1024) {
+    return std::shared_ptr<CoordinatorState>(new CoordinatorState(
+        std::move(input_path), reduce_partition, target_split_bytes));
+  }
+
+  CoordinatorState(const CoordinatorState &) = delete;
+  CoordinatorState &operator=(const CoordinatorState &) = delete;
+  CoordinatorState(CoordinatorState &&) = delete;
+  CoordinatorState &operator=(CoordinatorState &&) = delete;
 };
 } // namespace mr
