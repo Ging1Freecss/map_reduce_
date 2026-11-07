@@ -303,6 +303,10 @@ auto CoordinatorState::CheckLastHeartBeat(wc::HeartBeatRequest &request)
       task.last_heart_beat = std::chrono::steady_clock::now();
       return reply;
     }
+  } else if (request.task_type() == wc::TaskType::WAIT) {
+    reply.set_acknowledged(true);
+    reply.set_abort_task(false);
+    return reply;
   }
 
   reply.set_acknowledged(false);

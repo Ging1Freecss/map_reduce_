@@ -54,6 +54,7 @@ public:
   }
 
   void init();
+
   auto handle_poll_task(PollTaskRPC &rpc, wc::PollRequest &request)
       -> boost::asio::awaitable<void>;
 
@@ -100,6 +101,7 @@ private:
 
   // run to check heartbeats
   boost::asio::steady_timer timer_;
+
   std::unique_ptr<grpc::Server> server_;
 
   std::unique_ptr<helper::ServerShutdown> server_shutdown_;
