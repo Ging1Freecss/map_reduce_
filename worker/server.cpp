@@ -1,11 +1,14 @@
 #include "server.hpp"
+#include "helper.hpp"
 #include "mr_coordination.grpc.pb.h"
 #include "mr_coordination.pb.h"
 #include "shuffle.grpc.pb.h"
+#include "shuffle.pb.h"
 #include "state.hpp"
 #include <agrpc/client_rpc.hpp>
 #include <agrpc/detail/forward.hpp>
 #include <agrpc/grpc_context.hpp>
+#include <agrpc/register_awaitable_rpc_handler.hpp>
 #include <agrpc/run.hpp>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
@@ -29,6 +32,7 @@
 #include <boost/system/detail/error_code.hpp>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <grpcpp/client_context.h>
 #include <grpcpp/create_channel.h>
@@ -372,7 +376,8 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
     The root-cause order must be checked from external intent → local disk →
     remote network:
   */
-  if (stream_aborted || !disk_completed || !network_status.ok()) {
+  if (was_cancelled || stream_aborted || !disk_completed ||
+      !network_status.ok()) {
 
     // go to disk_strand thread_pool_ for file related work
     co_await boost::asio::post(disk_strand, boost::asio::use_awaitable);
@@ -589,6 +594,241 @@ auto WorkerServer::run_worker_with_heartbeats()
       co_await backoff.async_wait(boost::asio::use_awaitable);
     }
   }
+}
+
+void WorkerServer::register_handlers() {
+  agrpc::register_awaitable_rpc_handler<FetchPartitionRPC>(
+      *data_grpc_context_, data_shuffle_service_,
+      [self = shared_from_this()](
+          FetchPartitionRPC &rpc,
+          ww::PartitionRequest &request) -> boost::asio::awaitable<void> {
+        co_await self->handle_fetch_partition(rpc, request);
+        co_return;
+      },
+      helper::RethrowFirstArg{});
+}
+
+auto WorkerServer::handle_fetch_partition(FetchPartitionRPC &rpc,
+                                          ww::PartitionRequest &request)
+    -> boost::asio::awaitable<void> {
+  using ChunkChannel = boost::asio::experimental::concurrent_channel<void(
+      boost::system::error_code, ww::PartitionChunk)>;
+  // coroutine and its child type unchange , just let pass as it is
+  co_await boost::asio::this_coro::reset_cancellation_state(
+      boost::asio::enable_total_cancellation());
+
+  std::cout << "Starting server streaming of file: "
+            << request.partition_filename() << std::endl;
+
+  auto channel =
+      std::make_shared<ChunkChannel>(co_await boost::asio::this_coro::executor,
+                                     64); // one chunk -> 64kb -> 64chunk -> 4mb
+
+  const std::string &file_name = request.partition_filename();
+  std::size_t chunk_size = 64 * 1024; // 64 kb
+
+  // strand is used for disk coroutine and cancellation emit
+  auto disk_strand = boost::asio::make_strand(thread_pool_);
+
+  // signal for disk write in thread pool
+  auto disk_cancel_signal =
+      std::make_shared<boost::asio::cancellation_signal>();
+
+  // to get the output of reading to disk function below
+  using DoneChannel = boost::asio::experimental::concurrent_channel<void(
+      boost::system::error_code, bool)>;
+  auto done_ch = std::make_shared<DoneChannel>(
+      co_await boost::asio::this_coro::executor, 1);
+
+  std::cout << "[Worker] Spawning disk read coroutine..." << std::endl;
+  boost::asio::co_spawn(
+      disk_strand,
+      [channel, done_ch, file_name,
+       chunk_size]() -> boost::asio::awaitable<void> {
+        std::cout << "[Worker] Disk reader coroutine STARTED for " << file_name
+                  << std::endl;
+
+        std::ifstream file;
+
+        auto return_value = [&](bool val) -> boost::asio::awaitable<void> {
+          // very important, if signal.emit is called , then any co_await
+          // after that will abort but we need to send if this coroutine
+          // fails so we disable cancellation only when we are sending
+          // final output, inside the while loop its fine to abourt as
+          // we catch it
+          if (file.is_open()) {
+            file.close();
+          }
+
+          co_await boost::asio::this_coro::reset_cancellation_state(
+              boost::asio::disable_cancellation());
+          co_await done_ch->async_send(
+              boost::system::error_code{}, val,
+              boost::asio::as_tuple(boost::asio::use_awaitable));
+        };
+
+        file.open(file_name, std::ios::binary);
+        if (!file.is_open()) {
+          channel->close();
+          co_await return_value(false);
+          co_return;
+        }
+
+        file.seekg(0, std::ios::end);
+        const std::streamsize end_pos = file.tellg();
+
+        // check  error on seek
+        if (end_pos == std::streampos(-1)) {
+          channel->close();
+          co_await return_value(false);
+          co_return;
+        }
+
+        // 0-byte file
+        if (end_pos == std::streampos(0)) {
+          channel->close();
+          co_await return_value(false);
+          co_return;
+        }
+
+        std::int64_t bytes_to_read = static_cast<std::int64_t>(end_pos);
+
+        file.seekg(0, std::ios::beg);
+
+        std::uint64_t curr{0};
+
+        std::vector<char> buffer;
+        buffer.reserve(chunk_size);
+
+        bool ok = true;
+        while (ok && bytes_to_read > 0) {
+
+          std::uint64_t to_read_lenght =
+              std::min(static_cast<std::uint64_t>(bytes_to_read), chunk_size);
+
+          file.read(buffer.data(), to_read_lenght);
+
+          if (file.gcount() != to_read_lenght) {
+            channel->close();
+            co_await return_value(false);
+            co_return;
+          }
+
+          if (file.gcount() == 0) {
+            channel->close();
+            co_await return_value(true);
+            co_return;
+          }
+
+          ww::PartitionChunk chunk;
+          chunk.set_payload(buffer.data(), to_read_lenght);
+
+          auto [send_ec] = co_await channel->async_send(
+              boost::system::error_code{}, std::move(chunk),
+              boost::asio::as_tuple(boost::asio::use_awaitable));
+
+          if (send_ec) {
+            // check if the channel was closed due to cancellation:
+            auto cancel_state =
+                co_await boost::asio::this_coro::cancellation_state;
+            if (cancel_state.cancelled() !=
+                boost::asio::cancellation_type::none) {
+
+              channel->close();
+              co_await return_value(false);
+              co_return;
+            }
+
+            if (send_ec == boost::asio::experimental::error::channel_closed) {
+              // normal exit, parent close the channel after sending
+              // all chunks
+              break;
+            }
+            channel->close();
+            co_await return_value(false);
+            co_return;
+          }
+          bytes_to_read =
+              bytes_to_read - static_cast<std::int64_t>(to_read_lenght);
+        }
+
+        co_await return_value(true);
+        co_return;
+      }, // bind the disk coroutine to disk_cancel_sig
+      boost::asio::bind_cancellation_slot(disk_cancel_signal->slot(),
+                                          boost::asio::detached));
+
+  std::cout << "[Worker] calling co_await rpc.write(chunk)" << std::endl;
+  bool stream_aborted{false};
+  while (true) {
+
+    auto [receive_ec, chunk] = co_await channel->async_receive(
+        boost::asio::as_tuple(boost::asio::use_awaitable));
+
+    if (receive_ec) {
+      stream_aborted = true;
+      break;
+    }
+    bool ok = co_await rpc.write(chunk);
+
+    if (!ok) {
+      stream_aborted = true;
+      break;
+    }
+  }
+
+  // refers to heartbeat calling cancellation
+  auto cancel_state = co_await boost::asio::this_coro::cancellation_state;
+
+  const bool was_cancelled =
+      (cancel_state.cancelled() != boost::asio::cancellation_type::none);
+
+  // so later co_await wont abort immediately
+  co_await boost::asio::this_coro::reset_cancellation_state(
+      boost::asio::disable_cancellation());
+
+  if (was_cancelled || stream_aborted) {
+    co_await boost::asio::co_spawn(
+        disk_strand,
+        [disk_cancel_signal]() -> boost::asio::awaitable<void> {
+          disk_cancel_signal->emit(boost::asio::cancellation_type::terminal);
+          co_return;
+        },
+        boost::asio::use_awaitable);
+
+    channel->cancel();
+    rpc.cancel();
+  }
+
+  channel->close();
+
+  auto [ec, disk_completed] = co_await done_ch->async_receive(
+      boost::asio::as_tuple(boost::asio::use_awaitable));
+
+  done_ch->close();
+
+  if (was_cancelled || stream_aborted || !disk_completed) {
+    // cancelled from outside
+    if (was_cancelled) {
+      co_await rpc.finish(grpc::Status(
+          grpc::StatusCode::CANCELLED,
+          "handle fetch partition func cancelled by heartbeat or parent"));
+    }
+
+    if (!disk_completed) {
+      co_await rpc.finish(grpc::Status(grpc::StatusCode::DATA_LOSS,
+                                       "failure to read from disk"));
+    }
+
+    co_await rpc.finish(
+        grpc::Status(grpc::StatusCode::UNKNOWN,
+                     "handle fetch partition func abort for some reason"));
+
+    co_return;
+  }
+
+  co_await rpc.finish(grpc::Status::OK);
+  co_return;
 }
 
 void WorkerServer::run() {

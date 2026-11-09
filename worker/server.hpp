@@ -4,7 +4,9 @@
 #include "mr_coordination.pb.h"
 #include "server_shutdown.hpp"
 #include "shuffle.grpc.pb.h"
+#include "shuffle.pb.h"
 #include "state.hpp"
+#include <agrpc/detail/forward.hpp>
 #include <agrpc/grpc_context.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancellation_signal.hpp>
@@ -33,6 +35,31 @@ public:
 
   auto poll_complete_task(wc::CompleteRequest &request)
       -> boost::asio::awaitable<std::expected<wc::CompleteReply, grpc::Status>>;
+  /*
+    // Reduce worker asks Map worker for an intermediate partition file
+  message PartitionRequest {
+    string partition_filename = 1; // e.g., "mr-0_1.data"
+  }
+
+  // Streamed intermediate key-value bytes
+  message PartitionChunk {
+    bytes payload = 1; // 64 KB slice of intermediate partition
+  }
+
+  // Internal service hosted by every Worker node
+  service WorkerShuffleService {
+    // P2P Data Streaming (Map Worker -> Reduce Worker)
+    rpc FetchPartition(PartitionRequest) returns (stream PartitionChunk);
+  }
+  */
+
+  using FetchPartitionRPC = agrpc::ServerRPC<
+      &ww::WorkerShuffleService::AsyncService::RequestFetchPartition>;
+  auto handle_fetch_partition(FetchPartitionRPC &rpc,
+                              ww::PartitionRequest &request)
+      -> boost::asio::awaitable<void>;
+
+  void register_handlers();
 
 private:
   explicit WorkerServer(std::string coordinator_endpoint,
