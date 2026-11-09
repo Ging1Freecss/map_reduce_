@@ -2,6 +2,7 @@
 #include "mr_coordination.grpc.pb.h"
 #include "mr_coordination.pb.h"
 #include "shuffle.grpc.pb.h"
+#include "state.hpp"
 #include <agrpc/client_rpc.hpp>
 #include <agrpc/detail/forward.hpp>
 #include <agrpc/grpc_context.hpp>
@@ -15,8 +16,10 @@
 #include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/experimental/concurrent_channel.hpp>
+#include <boost/asio/ip/host_name.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
@@ -42,34 +45,55 @@
           grpc::CreateChannel(host, grpc::InsecureChannelCredentials()))) {}
 */
 namespace mr {
-WorkerServer::WorkerServer(std::string host, std::size_t num_threads)
-    : host_{std::move(host)},
-      wc_stub_(wc::MapReduceService::NewStub(
-          grpc::CreateChannel(host_, grpc::InsecureChannelCredentials()))),
-      ww_stub_(ww::WorkerShuffleService::NewStub(
-          grpc::CreateChannel(host_, grpc::InsecureChannelCredentials()))),
+WorkerServer::WorkerServer(std::string coordinator_endpoint,
+                           std::string listen_address,
+                           std::string advertised_host, std::size_t num_threads)
+    : coordinator_endpoint_{std::move(coordinator_endpoint)},
+      listen_address_{std::move(listen_address)},
+      advertised_host_(advertised_host),
+      wc_control_stub_(wc::MapReduceService::NewStub(grpc::CreateChannel(
+          coordinator_endpoint_, grpc::InsecureChannelCredentials()))),
+      wc_data_stub_(wc::MapReduceService::NewStub(grpc::CreateChannel(
+          coordinator_endpoint_, grpc::InsecureChannelCredentials()))),
       thread_pool_(num_threads),
       main_work_guard_(boost::asio::make_work_guard(io_context_)),
-      bg_work_guard_(boost::asio::make_work_guard(bg_io_context_)),
-      signal_{std::make_shared<boost::asio::cancellation_signal>()} {
+      bg_work_guard_(boost::asio::make_work_guard(bg_io_context_)) {
+
+  // worker initialisation
+  worker_state_.worker_id_ = "worker-" + boost::asio::ip::host_name() + "-" +
+                             std::to_string(::getpid());
+  worker_state_.advertised_host_ = advertised_host_;
 
   grpc::ServerBuilder builder;
 
   control_grpc_context_ =
       std::make_unique<agrpc::GrpcContext>(builder.AddCompletionQueue());
-
   data_grpc_context_ =
       std::make_unique<agrpc::GrpcContext>(builder.AddCompletionQueue());
-  builder.AddListeningPort(host, grpc::InsecureServerCredentials());
-  builder.RegisterService(&data_service_);
+  data_grpc_context_->work_started();
+  control_grpc_context_->work_started();
+
+  builder.AddListeningPort(listen_address_, grpc::InsecureServerCredentials());
+  builder.RegisterService(&data_shuffle_service_);
+
   server_ = builder.BuildAndStart();
 
   if (!server_) {
-    throw std::runtime_error("Failed to start gRPC server on " + host_);
+    throw std::runtime_error("Failed to start gRPC server on " +
+                             listen_address_);
   }
 
   server_shutdown_ = std::make_unique<helper::ServerShutdown>(
       *server_, *control_grpc_context_, &io_context_);
+}
+
+WorkerServer::~WorkerServer() {
+  if (control_grpc_context_) {
+    control_grpc_context_->stop();
+  }
+  if (data_grpc_context_) {
+    data_grpc_context_->stop();
+  }
 }
 
 auto WorkerServer::poll_task_async(wc::PollRequest &request)
@@ -83,8 +107,9 @@ auto WorkerServer::poll_task_async(wc::PollRequest &request)
                               std::chrono::seconds(3));
 
   wc::TaskAssignment response;
-  grpc::Status status = co_await RPC::request(
-      *control_grpc_context_, *wc_stub_, client_context, request, response);
+  grpc::Status status =
+      co_await RPC::request(*control_grpc_context_, *wc_control_stub_,
+                            client_context, request, response);
 
   if (status.ok()) {
     co_return response;
@@ -103,13 +128,9 @@ auto WorkerServer::poll_heart_beat(wc::HeartBeatRequest &request)
                               std::chrono::seconds(2));
   wc::HeartBeatReply response;
 
-  if (!worker_state_.task_assignment_.has_value()) {
-    response.set_abort_task(true);
-    response.set_acknowledged(false);
-    co_return response;
-  }
-  grpc::Status status = co_await RPC::request(
-      *control_grpc_context_, *wc_stub_, client_context, request, response);
+  grpc::Status status =
+      co_await RPC::request(*control_grpc_context_, *wc_control_stub_,
+                            client_context, request, response);
 
   if (status.ok()) {
     co_return response;
@@ -117,6 +138,26 @@ auto WorkerServer::poll_heart_beat(wc::HeartBeatRequest &request)
   co_return std::unexpected(status);
 }
 
+auto WorkerServer::poll_complete_task(wc::CompleteRequest &request)
+    -> boost::asio::awaitable<std::expected<wc::CompleteReply, grpc::Status>> {
+
+  using RPC =
+      agrpc::ClientRPC<&wc::MapReduceService::Stub::PrepareAsyncCompleteTask>;
+
+  grpc::ClientContext client_context;
+  client_context.set_deadline(std::chrono::system_clock::now() +
+                              std::chrono::seconds(2));
+
+  wc::CompleteReply response;
+
+  grpc::Status status =
+      co_await RPC::request(*control_grpc_context_, *wc_control_stub_,
+                            client_context, request, response);
+  if (status.ok()) {
+    co_return response;
+  }
+  co_return std::unexpected(status);
+}
 /*
   download data from coordinator
   poll the task in thread in which data_grpc_context_ polls in
@@ -141,16 +182,20 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
       boost::asio::enable_total_cancellation());
   RPC rpc{*data_grpc_context_};
 
-  if (!(co_await rpc.start(*wc_stub_, request))) {
+  std::cout << "[Worker] Starting rpc.start..." << std::endl;
+  if (!(co_await rpc.start(*wc_data_stub_, request))) {
+    std::cout << "[Worker] rpc.start FAILED!" << std::endl;
     co_return co_await rpc.finish();
   }
+  std::cout << "[Worker] rpc.start SUCCEEDED!" << std::endl;
 
-  ChunkChannel channel{co_await boost::asio::this_coro::executor,
-                       64}; // 64 * 64kb = 4mb
+  auto channel =
+      std::make_shared<ChunkChannel>(co_await boost::asio::this_coro::executor,
+                                     64); // 64 * 64kb = 4mb
 
   // create data file
-  const std::string map_data_filename =
-      request.input_file() + ".map_data." + std::to_string(request.task_id());
+  const std::string map_data_filename = worker_state_.GetMapTaskInputFileName(
+      request.input_file(), request.task_id());
 
   // cancellation using signal
   /*
@@ -171,21 +216,32 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
   auto done_ch = std::make_shared<DoneChannel>(
       co_await boost::asio::this_coro::executor, 1);
 
+  std::cout << "[Worker] Spawning disk writer coroutine..." << std::endl;
   boost::asio::co_spawn(
       disk_strand,
-      [&channel, done_ch, map_data_filename]() -> boost::asio::awaitable<void> {
+      [channel, done_ch, map_data_filename,
+       disk_cancel_signal]() -> boost::asio::awaitable<void> {
+        std::cout << "[Worker] Disk writer coroutine STARTED for "
+                  << map_data_filename << std::endl;
+        std::ofstream file;
+
         auto return_value = [&](bool val) -> boost::asio::awaitable<void> {
           // very important, if signal.emit is called , then any co_await
           // after that will abort but we need to send if this coroutine
           // fails so we disable cancellation only when we are sending
           // final output, inside the while loop its fine to abourt as
           // we catch it
+          if (file.is_open()) {
+            file.close();
+          }
+
           co_await boost::asio::this_coro::reset_cancellation_state(
               boost::asio::disable_cancellation());
           co_await done_ch->async_send(
               boost::system::error_code{}, val,
               boost::asio::as_tuple(boost::asio::use_awaitable));
         };
+
         // create parent directory if not present
 
         std::error_code fs_ec;
@@ -193,23 +249,21 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
         if (p.has_parent_path()) {
           std::filesystem::create_directories(p.parent_path(), fs_ec);
           if (fs_ec) {
-            channel.close();
+            channel->close();
             co_await return_value(false);
             co_return;
           }
         }
 
-        std::ofstream file{map_data_filename,
-                           std::ios::binary | std::ios::trunc};
-
+        file.open(map_data_filename, std::ios::binary | std::ios::trunc);
         if (!file.is_open()) {
-          channel.close();
+          channel->close();
           co_await return_value(false);
           co_return;
         }
 
         while (true) {
-          auto [ec, payload] = co_await channel.async_receive(
+          auto [ec, payload] = co_await channel->async_receive(
               boost::asio::as_tuple(boost::asio::use_awaitable));
 
           if (ec) {
@@ -220,7 +274,7 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
             if (cancel_state.cancelled() !=
                 boost::asio::cancellation_type::none) {
 
-              channel.close();
+              channel->close();
               co_await return_value(false);
               co_return;
             }
@@ -230,20 +284,18 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
               // all chunks
               break;
             }
-            channel.close();
+            channel->close();
             co_await return_value(false);
             co_return;
           }
 
           file.write(payload.data(), payload.size());
           if (file.fail()) {
-            channel.close();
+            channel->close();
             co_await return_value(false);
             co_return;
           }
         }
-
-        file.close();
 
         co_await return_value(!file.fail());
         co_return;
@@ -256,8 +308,11 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
   wc::SplitDataChunk chunk;
   bool stream_aborted{false};
 
+  std::cout << "[Worker] Calling co_await rpc.read(chunk)..." << std::endl;
   while (co_await rpc.read(chunk)) {
-    auto [send_ec] = co_await channel.async_send(
+    std::cout << "[Worker] Read chunk with " << chunk.payload().size()
+              << " bytes" << std::endl;
+    auto [send_ec] = co_await channel->async_send(
         boost::system::error_code{}, std::move(*chunk.mutable_payload()),
         boost::asio::as_tuple(boost::asio::use_awaitable));
 
@@ -300,11 +355,11 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
         },
         boost::asio::use_awaitable);
 
-    channel.cancel();
+    channel->cancel();
     rpc.cancel();
   }
 
-  channel.close();
+  channel->close();
 
   grpc::Status network_status = co_await rpc.finish();
 
@@ -348,9 +403,106 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
 
 auto WorkerServer::start_worker() -> boost::asio::awaitable<void> {
 
+  auto ex = co_await boost::asio::this_coro::executor;
+
   while (true) {
     wc::PollRequest request;
-    co_await poll_task_async(request);
+    request.set_worker_id(worker_state_.worker_id_);
+
+    std::expected<wc::TaskAssignment, grpc::Status> res =
+        co_await poll_task_async(request);
+
+    if (!res)
+      throw std::runtime_error("issue in polling");
+
+    // set task in worker state
+    wc::TaskAssignment &task = res.value();
+
+    if (task.type() == wc::TaskType::WAIT) {
+      boost::asio::steady_timer delay{
+          co_await boost::asio::this_coro::executor};
+
+      delay.expires_after(poll_task_wait_interval);
+
+      co_await delay.async_wait(boost::asio::use_awaitable);
+      continue;
+    } else if (task.type() == wc::TaskType::MAP) {
+      std::cout << "[Worker] Assigned MAP task " << task.task_id() << " (gen "
+                << task.generation_id() << ", offset " << task.offset()
+                << ", len " << task.length() << ")" << std::endl;
+
+      wc::SplitDataRequest split_data_request;
+
+      split_data_request.set_task_id(task.task_id());
+      split_data_request.set_generation_id(task.generation_id());
+      split_data_request.set_input_file(task.input_file());
+      split_data_request.set_offset(task.offset());
+      split_data_request.set_length(task.length());
+
+      worker_state_.SetMapState(task);
+
+      // download data
+      std::cout << "[Worker] Fetching map data from coordinator..."
+                << std::endl;
+      grpc::Status download_status = co_await boost::asio::co_spawn(
+          bg_io_context_, fetch_map_data(split_data_request),
+          boost::asio::use_awaitable);
+
+      if (!download_status.ok()) {
+        std::cerr << "[Worker] Fetch map data failed: "
+                  << download_status.error_message() << std::endl;
+        throw std::runtime_error("error in downloading map data");
+      }
+
+      std::cout
+          << "[Worker] Map data downloaded successfully. Executing mapper..."
+          << std::endl;
+      // in thread pool , execute map task
+      co_await boost::asio::post(thread_pool_, boost::asio::use_awaitable);
+      std::optional<wc::CompleteRequest> map_res =
+          worker_state_.ExecuteMapTask();
+
+      if (!map_res)
+        throw std::runtime_error("error in map phase");
+
+      // Switch back to main executor to call gRPC
+      co_await boost::asio::post(ex, boost::asio::use_awaitable);
+
+      wc::CompleteRequest &complete_request = map_res.value();
+      std::cout << "[Worker] Reporting completion with "
+                << complete_request.output_paths_size()
+                << " output partition(s)..." << std::endl;
+
+      auto res_complete_task = co_await poll_complete_task(complete_request);
+
+      if (!res_complete_task) {
+        throw std::runtime_error("error in poll_complete_task, grpc::Status: " +
+                                 res_complete_task.error().error_message());
+      }
+
+      wc::CompleteReply &complete_reply = res_complete_task.value();
+      if (!complete_reply.accepted()) {
+        throw std::runtime_error("Coordinator rejected CompleteTask");
+      }
+
+      std::cout << "[Worker] Map task " << task.task_id()
+                << " completed and accepted by coordinator!" << std::endl;
+      std::error_code rm_ec;
+      std::filesystem::remove(worker_state_.GetMapTaskInputFileName(
+                                  task.input_file(), task.task_id()),
+                              rm_ec);
+      worker_state_.ResetWorkerState();
+    } else if (task.type() == wc::TaskType::REDUCE) {
+      std::cout << "[Worker] Assigned REDUCE task " << task.task_id()
+                << " with " << task.intermediate_paths_size()
+                << " partitions. (Reduce phase pending implementation)"
+                << std::endl;
+      boost::asio::steady_timer delay{
+          co_await boost::asio::this_coro::executor};
+      delay.expires_after(std::chrono::seconds(5));
+      co_await delay.async_wait(boost::asio::use_awaitable);
+      continue;
+    }
   }
   co_return;
 }
@@ -360,37 +512,103 @@ auto WorkerServer::start_heart_beats() -> boost::asio::awaitable<void> {
   while (true) {
 
     wc::HeartBeatRequest request;
-    request.set_allocated_worker_id(&worker_state_.worker_id_);
-    request.set_task_type(wc::TaskType::WAIT);
+    request.set_worker_id(worker_state_.worker_id_);
+
+    if (worker_state_.task_assignment_) {
+      request.set_task_type(worker_state_.task_assignment_->type());
+      request.set_task_id(worker_state_.task_assignment_->task_id());
+      request.set_generation_id(
+          worker_state_.task_assignment_->generation_id());
+    } else {
+      request.set_task_type(wc::TaskType::WAIT);
+    }
 
     auto res = co_await poll_heart_beat(request);
 
-    if (res) {
-      if (res.value().acknowledged()) {
-        boost::asio::steady_timer timer(
-            co_await boost::asio::this_coro::executor);
+    if (res && res.value().acknowledged()) {
 
-        timer.expires_after(
-            std::chrono::seconds(heart_beat_intervals_in_seconds));
+      boost::asio::steady_timer timer(
+          co_await boost::asio::this_coro::executor);
 
-        co_await timer.async_wait(boost::asio::use_awaitable);
-      } else {
-      }
+      timer.expires_after(heart_beat_interval);
+
+      co_await timer.async_wait(boost::asio::use_awaitable);
+
     } else {
-      throw std::runtime_error("error in heart beat" +
-                               res.error().error_message());
+      // coordinator rejected task or network issue
+
+      if (signal_) {
+        signal_->emit(boost::asio::cancellation_type::terminal);
+      }
+
+      boost::asio::steady_timer retry_timer{
+          co_await boost::asio::this_coro::executor, heart_beat_interval};
+      co_await retry_timer.async_wait(boost::asio::use_awaitable);
+    }
+  }
+}
+
+auto WorkerServer::run_worker_with_heartbeats()
+    -> boost::asio::awaitable<void> {
+
+  auto ex = co_await boost::asio::this_coro::executor;
+
+  while (true) {
+
+    // allocate a fresh signal for each session
+    // once signal has emitted ,it is spent and cant be reused
+
+    signal_ = std::make_shared<boost::asio::cancellation_signal>();
+    bool was_aborted = false;
+
+    try {
+
+      co_await boost::asio::co_spawn(
+          ex, start_worker(),
+          boost::asio::bind_cancellation_slot(signal_->slot(),
+                                              boost::asio::use_awaitable));
+      break;
+    } catch (const boost::system::system_error &e) {
+
+      // worker session was cancelled by heartbeat
+      // reset state so the worker is clean for next attempt
+      if (e.code() == boost::asio::error::operation_aborted) {
+        was_aborted = true;
+      } else {
+        throw;
+      }
+    }
+
+    if (was_aborted) {
+
+      // reset worker state
+      worker_state_.ResetWorkerState();
+
+      // Backoff delay before restarting start_worker():
+      boost::asio::steady_timer backoff{ex, std::chrono::milliseconds(500)};
+      co_await backoff.async_wait(boost::asio::use_awaitable);
     }
   }
 }
 
 void WorkerServer::run() {
+
   boost::asio::co_spawn(
       io_context_,
-      [&]() -> boost::asio::awaitable<void> { co_await start_worker(); },
+      [&]() -> boost::asio::awaitable<void> {
+        co_await run_worker_with_heartbeats();
+      },
+      boost::asio::detached);
+
+  boost::asio::co_spawn(
+      io_context_,
+      [&]() -> boost::asio::awaitable<void> { co_await start_heart_beats(); },
       boost::asio::detached);
 
   background_thread_ = std::jthread([self = shared_from_this()]() {
+    std::cout << "[Worker] background_thread_ started" << std::endl;
     agrpc::run(*self->data_grpc_context_, self->bg_io_context_);
+    std::cout << "[Worker] background_thread_ EXITED!" << std::endl;
   });
 
   agrpc::run(*control_grpc_context_, io_context_);

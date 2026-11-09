@@ -1,3 +1,5 @@
+#pragma once
+
 #include "mr_coordination.grpc.pb.h"
 #include "mr_coordination.pb.h"
 #include "server_shutdown.hpp"

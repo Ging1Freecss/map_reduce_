@@ -29,8 +29,15 @@ public:
   auto fetch_map_data(wc::SplitDataRequest &request)
       -> boost::asio::awaitable<grpc::Status>;
 
+  // rpc CompleteTask(CompleteRequest) returns (CompleteReply);
+
+  auto poll_complete_task(wc::CompleteRequest &request)
+      -> boost::asio::awaitable<std::expected<wc::CompleteReply, grpc::Status>>;
+
 private:
-  explicit WorkerServer(std::string host, std::size_t num_threads);
+  explicit WorkerServer(std::string coordinator_endpoint,
+                        std::string listen_address, std::string advertised_host,
+                        std::size_t num_threads);
 
   /*
    static std::shared_ptr<CoordinateServer>
@@ -46,20 +53,25 @@ private:
   */
 
 public:
-  static auto create(std::string host, std::size_t num_threads)
+  static auto create(std::string coordinator_endpoint,
+                     std::string listen_address, std::string advertised_host,
+                     std::size_t num_threads = 4)
       -> std::shared_ptr<WorkerServer> {
-    auto server = std::shared_ptr<WorkerServer>(
-        new WorkerServer(std::move(host), num_threads));
-    return server;
+    return std::shared_ptr<WorkerServer>(new WorkerServer(
+        std::move(coordinator_endpoint), std::move(listen_address),
+        std::move(advertised_host), num_threads));
   }
 
   auto start_worker() -> boost::asio::awaitable<void>;
   auto start_heart_beats() -> boost::asio::awaitable<void>;
   void run();
+  auto run_worker_with_heartbeats() -> boost::asio::awaitable<void>;
+  ~WorkerServer();
 
 private:
-  std::string host_;
-
+  std::string coordinator_endpoint_;
+  std::string listen_address_;
+  std::string advertised_host_;
   // io related
   boost::asio::io_context io_context_;
   boost::asio::executor_work_guard<boost::asio::io_context::executor_type>
@@ -73,13 +85,13 @@ private:
   std::jthread background_thread_;
 
   // state of worker
-  std::unique_ptr<wc::MapReduceService::Stub> wc_stub_;
+  std::unique_ptr<wc::MapReduceService::Stub> wc_control_stub_;
+  std::unique_ptr<wc::MapReduceService::Stub> wc_data_stub_;
   std::unique_ptr<agrpc::GrpcContext> control_grpc_context_;
 
   // download data
-  std::unique_ptr<ww::WorkerShuffleService::Stub> ww_stub_;
   std::unique_ptr<agrpc::GrpcContext> data_grpc_context_;
-  ww::WorkerShuffleService::AsyncService data_service_;
+  ww::WorkerShuffleService::AsyncService data_shuffle_service_;
 
   // worker to worker server and client
   std::unique_ptr<grpc::Server> server_;
@@ -93,7 +105,8 @@ private:
   std::shared_ptr<boost::asio::cancellation_signal> signal_;
 
   // time intervals
-  static constexpr std::size_t heart_beat_intervals_in_seconds{2};
+  static constexpr std::chrono::milliseconds heart_beat_interval{2000};
+  static constexpr std::chrono::milliseconds poll_task_wait_interval{500};
 };
 
 } // namespace mr

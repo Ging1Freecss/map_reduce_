@@ -1,3 +1,5 @@
+#pragma once
+
 #include "mr_coordination.pb.h"
 #include "storage/split_reader.hpp"
 #include <atomic>

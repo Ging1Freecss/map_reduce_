@@ -31,6 +31,9 @@ CoordinateServer::CoordinateServer(
       std::make_unique<agrpc::GrpcContext>(builder_.AddCompletionQueue());
   data_grpc_context_ =
       std::make_unique<agrpc::GrpcContext>(builder_.AddCompletionQueue());
+  control_grpc_context_->work_started();
+  data_grpc_context_->work_started();
+
   builder_.AddListeningPort(host_, grpc::InsecureServerCredentials());
   builder_.RegisterService(&wc_service_);
 
@@ -54,7 +57,14 @@ void CoordinateServer::init() {
       boost::asio::detached);
 }
 
-CoordinateServer::~CoordinateServer() = default;
+CoordinateServer::~CoordinateServer() {
+  if (control_grpc_context_) {
+    control_grpc_context_->stop();
+  }
+  if (data_grpc_context_) {
+    data_grpc_context_->stop();
+  }
+}
 
 auto CoordinateServer::scheduleRecurringTasks()
     -> boost::asio::awaitable<void> {
@@ -128,6 +138,9 @@ auto CoordinateServer::handle_poll_task(PollTaskRPC &rpc,
     -> boost::asio::awaitable<void> {
   wc::TaskAssignment response =
       coordinate_state_->DistributeTaskToPollingWorker(request.worker_id());
+  std::cout << "[Coordinator] PollTask from " << request.worker_id()
+            << " -> assigned task_id=" << response.task_id()
+            << " type=" << static_cast<int>(response.type()) << std::endl;
   co_await rpc.finish(response, grpc::Status::OK);
 }
 
@@ -143,6 +156,8 @@ auto CoordinateServer::handle_complete_task(CompleteTaskRPC &rpc,
     -> boost::asio::awaitable<void> {
   wc::CompleteReply response =
       coordinate_state_->WorkerReportCompletedMapTask(request);
+  std::cout << "[Coordinator] CompleteTask for task_id=" << request.task_id()
+            << " accepted=" << response.accepted() << std::endl;
   co_await rpc.finish(response, grpc::Status::OK);
 }
 
@@ -157,19 +172,27 @@ auto CoordinateServer::handle_report_shuffle_error(
 auto CoordinateServer::handle_fetch_input_split(FetchInputSplitRPC &rpc,
                                                 wc::SplitDataRequest &request)
     -> boost::asio::awaitable<void> {
+  std::cout << "[Coordinator] handle_fetch_input_split called for task_id="
+            << request.task_id() << " gen=" << request.generation_id()
+            << std::endl;
 
   if (!coordinate_state_->ValidateSplitRequest(request)) {
+    std::cout << "[Coordinator] ValidateSplitRequest FAILED for task_id="
+              << request.task_id() << std::endl;
     co_await rpc.finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                                      "Invalid split request or expired lease"));
     co_return;
   }
 
-  co_await boost::asio::post(
-      boost::asio::bind_executor(thread_pool_, boost::asio::use_awaitable));
+  co_await boost::asio::post(thread_pool_, boost::asio::use_awaitable);
 
+  std::cout << "[Coordinator] File opening: " << request.input_file()
+            << std::endl;
   std::ifstream file(request.input_file(), std::ios::binary);
 
   if (!file.is_open()) {
+    std::cout << "[Coordinator] File NOT found: " << request.input_file()
+              << std::endl;
     co_await rpc.finish(
         grpc::Status(grpc::StatusCode::NOT_FOUND, "Input file not found"));
     co_return;
@@ -178,10 +201,15 @@ auto CoordinateServer::handle_fetch_input_split(FetchInputSplitRPC &rpc,
   file.seekg(request.offset());
 
   std::uint64_t bytes_remaining = request.length();
+  std::cout << "[Coordinator] bytes_remaining to send: " << bytes_remaining
+            << std::endl;
   std::vector<char> buffer(64 * 1024); // 64 kb slice
   bool ok = true;
 
   while (ok && bytes_remaining > 0) {
+
+    co_await boost::asio::post(thread_pool_, boost::asio::use_awaitable);
+
     std::size_t to_read =
         std::min<std::uint64_t>(bytes_remaining, buffer.size());
 
@@ -197,13 +225,20 @@ auto CoordinateServer::handle_fetch_input_split(FetchInputSplitRPC &rpc,
     chunk.set_payload(buffer.data(), bytes_read);
     //  send slice over TCP with backpressure
     // The tag completes in data_grpc_context_ and resumes there
-    ok = co_await rpc.write(chunk);
     bytes_remaining -= bytes_read;
+    std::cout << "[Coordinator] Sending chunk of size " << bytes_read << "..."
+              << std::endl;
+    ok = co_await rpc.write(chunk);
+    std::cout << "[Coordinator] rpc.write returned " << ok << std::endl;
   }
 
   if (ok) {
+    std::cout << "[Coordinator] All chunks sent successfully. Finishing RPC OK."
+              << std::endl;
     co_await rpc.finish(grpc::Status::OK);
   } else {
+    std::cout << "[Coordinator] Issue sending data. Finishing RPC error."
+              << std::endl;
     co_await rpc.finish(
         grpc::Status(grpc::StatusCode::NOT_FOUND, "Issue with sending data"));
   }
