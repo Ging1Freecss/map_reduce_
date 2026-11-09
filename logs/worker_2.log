@@ -3,8 +3,10 @@
 [Worker] Advertised host:    127.0.0.1:50054
 [Worker] background_thread_ started
 [Worker] Assigned REDUCE task 2 with 3 partitions. (Reduce phase pending implementation)
-[Worker] Assigned REDUCE task 1 with 3 partitions. (Reduce phase pending implementation)
 [Worker] Assigned REDUCE task 2 with 3 partitions. (Reduce phase pending implementation)
 [Worker] Assigned REDUCE task 1 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Assigned REDUCE task 1 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Assigned REDUCE task 1 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Assigned REDUCE task 0 with 3 partitions. (Reduce phase pending implementation)
 
 Shutdown signal received...

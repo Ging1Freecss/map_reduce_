@@ -41,5 +41,9 @@
 [Worker] Assigned REDUCE task 3 with 3 partitions. (Reduce phase pending implementation)
 [Worker] Assigned REDUCE task 0 with 3 partitions. (Reduce phase pending implementation)
 [Worker] Assigned REDUCE task 3 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Assigned REDUCE task 0 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Assigned REDUCE task 3 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Assigned REDUCE task 0 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Assigned REDUCE task 3 with 3 partitions. (Reduce phase pending implementation)
 
 Shutdown signal received...
