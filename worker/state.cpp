@@ -28,7 +28,7 @@ auto WorkerState::ExecuteMapTask() -> std::optional<wc::CompleteRequest> {
   }
 
   // local directory for output of map phase
-  std::filesystem::path local_base_dir = "/tmp/mr_worker_intermediate";
+  std::filesystem::path local_base_dir = map_phase_op_dir;
   std::error_code ec;
   std::filesystem::create_directories(local_base_dir, ec);
 

@@ -481,6 +481,7 @@ auto CoordinatorState::ValidateSplitRequest(
   return task.generation_id == request.generation_id() &&
          task.task_rec.state == State::IN_PROGRESS &&
          task.split.offset == request.offset() &&
-         task.split.length == request.length();
+         task.split.length == request.length() &&
+         request.input_file() == job_conf.input_path.string();
 }
 } // namespace mr

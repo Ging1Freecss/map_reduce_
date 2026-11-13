@@ -110,6 +110,9 @@ private:
 
   //  hold state of current data handle by coordinator
   std::shared_ptr<CoordinatorState> coordinate_state_;
+
+  // thread for data sending and receiving
+  std::jthread data_thread_;
 };
 
 } // namespace mr

@@ -23,5 +23,7 @@ public:
   std::string worker_id_;
   std::string advertised_host_;
   std::optional<wc::TaskAssignment> task_assignment_{std::nullopt};
+
+  const std::string map_phase_op_dir{"/tmp/mr_worker_intermediate"};
 };
 } // namespace mr

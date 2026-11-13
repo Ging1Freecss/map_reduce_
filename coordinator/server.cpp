@@ -8,7 +8,11 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/experimental/channel_error.hpp>
+#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/redirect_error.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <cstddef>
@@ -172,6 +176,9 @@ auto CoordinateServer::handle_report_shuffle_error(
 auto CoordinateServer::handle_fetch_input_split(FetchInputSplitRPC &rpc,
                                                 wc::SplitDataRequest &request)
     -> boost::asio::awaitable<void> {
+
+  co_await boost::asio::this_coro::throw_if_cancelled(false);
+
   std::cout << "[Coordinator] handle_fetch_input_split called for task_id="
             << request.task_id() << " gen=" << request.generation_id()
             << std::endl;
@@ -184,69 +191,157 @@ auto CoordinateServer::handle_fetch_input_split(FetchInputSplitRPC &rpc,
     co_return;
   }
 
-  co_await boost::asio::post(thread_pool_, boost::asio::use_awaitable);
-
   std::cout << "[Coordinator] File opening: " << request.input_file()
             << std::endl;
-  std::ifstream file(request.input_file(), std::ios::binary);
 
-  if (!file.is_open()) {
-    std::cout << "[Coordinator] File NOT found: " << request.input_file()
-              << std::endl;
-    co_await rpc.finish(
-        grpc::Status(grpc::StatusCode::NOT_FOUND, "Input file not found"));
-    co_return;
-  }
+  using ChunkChannel = boost::asio::experimental::concurrent_channel<void(
+      boost::system::error_code, wc::SplitDataChunk)>;
 
-  file.seekg(request.offset());
+  using DoneChannel = boost::asio::experimental::concurrent_channel<void(
+      boost::system::error_code, grpc::Status)>;
 
-  std::uint64_t bytes_remaining = request.length();
-  std::cout << "[Coordinator] bytes_remaining to send: " << bytes_remaining
-            << std::endl;
-  std::vector<char> buffer(64 * 1024); // 64 kb slice
-  bool ok = true;
+  auto io_executor = co_await boost::asio::this_coro::executor;
+  auto channel =
+      std::make_shared<ChunkChannel>(io_executor, 64); // 64*64kb = 4mb buffer
+  auto done_ch = std::make_shared<DoneChannel>(io_executor, 1);
 
-  while (ok && bytes_remaining > 0) {
+  auto disk_strand = boost::asio::make_strand(thread_pool_);
+  // producer: to read from disk
+  boost::asio::co_spawn(
+      disk_strand,
+      [channel, done_ch, request,
+       self = shared_from_this()]() -> boost::asio::awaitable<void> {
+        co_await boost::asio::this_coro::throw_if_cancelled(false);
 
-    co_await boost::asio::post(thread_pool_, boost::asio::use_awaitable);
+        std::ifstream file;
+        auto return_value = [&](grpc::Status val) {
+          if (file.is_open()) {
+            file.close();
+          }
+          channel->close();
+          done_ch->try_send(boost::system::error_code{}, val);
+          done_ch->close();
+        };
 
-    std::size_t to_read =
-        std::min<std::uint64_t>(bytes_remaining, buffer.size());
+        file.open(request.input_file(), std::ios::binary);
+        if (!file.is_open()) {
+          return_value(grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                    "Input file not found"));
+          co_return;
+        }
 
-    file.read(buffer.data(), to_read);
+        file.seekg(request.offset());
+        if (file.fail()) {
+          return_value(grpc::Status(grpc::StatusCode::INTERNAL,
+                                    "Failed to seek input file offset"));
+          co_return;
+        }
 
-    std::streamsize bytes_read = file.gcount();
-    if (bytes_read <= 0) {
-      ok = false;
+        std::uint64_t bytes_remaining = request.length();
+        std::vector<char> buffer(64 * 1024);
+        grpc::Status final_status = grpc::Status::OK;
+
+        while (bytes_remaining > 0) {
+          std::size_t to_read =
+              std::min<std::uint64_t>(bytes_remaining, buffer.size());
+
+          file.read(buffer.data(), static_cast<std::streamsize>(to_read));
+
+          std::streamsize bytes_read = file.gcount();
+
+          if (bytes_read <= 0) {
+            return_value(grpc::Status(grpc::StatusCode::DATA_LOSS,
+                                      "Unexpected EOF while reading split"));
+            co_return;
+          }
+
+          bytes_remaining -= bytes_read;
+          wc::SplitDataChunk chunk;
+          chunk.set_payload(buffer.data(), bytes_read);
+
+          auto [send_ec] = co_await channel->async_send(
+              boost::system::error_code{}, std::move(chunk),
+              boost::asio::as_tuple(boost::asio::use_awaitable));
+
+          if (send_ec) {
+            return_value(grpc::Status(grpc::StatusCode::ABORTED,
+                                      "Streaming aborted on channel send"));
+            co_return;
+          }
+        }
+
+        return_value(grpc::Status::OK);
+      },
+      [channel, done_ch](std::exception_ptr ep) {
+        channel->close();
+        if (ep) {
+          done_ch->try_send(boost::system::error_code{},
+                            grpc::Status(grpc::StatusCode::INTERNAL,
+                                         "Exception in split reader task"));
+          done_ch->close();
+        }
+      });
+
+  // consumer , send data to client
+  bool stream_aborted = false;
+
+  while (true) {
+    auto [recv_ec, chunk] = co_await channel->async_receive(
+        boost::asio::as_tuple(boost::asio::use_awaitable));
+
+    if (recv_ec) {
+
+      // EOF from producer
+      if (recv_ec == boost::asio::experimental::error::channel_closed) {
+        break;
+      }
+
+      stream_aborted = true;
       break;
     }
 
-    wc::SplitDataChunk chunk;
-    chunk.set_payload(buffer.data(), bytes_read);
-    //  send slice over TCP with backpressure
-    // The tag completes in data_grpc_context_ and resumes there
-    bytes_remaining -= bytes_read;
-    std::cout << "[Coordinator] Sending chunk of size " << bytes_read << "..."
-              << std::endl;
-    ok = co_await rpc.write(chunk);
-    std::cout << "[Coordinator] rpc.write returned " << ok << std::endl;
+    bool ok = co_await rpc.write(chunk);
+
+    if (!ok) {
+      stream_aborted = true;
+      channel->cancel();
+      channel->close();
+      break;
+    }
   }
 
-  if (ok) {
-    std::cout << "[Coordinator] All chunks sent successfully. Finishing RPC OK."
-              << std::endl;
-    co_await rpc.finish(grpc::Status::OK);
+  if (stream_aborted) {
+
+    channel->cancel();
+    channel->close();
+  }
+
+  auto [done_ec, disk_status] = co_await done_ch->async_receive(
+      boost::asio::as_tuple(boost::asio::use_awaitable));
+
+  if (stream_aborted) {
+
+    if (rpc.context().IsCancelled()) {
+      co_await rpc.finish(grpc::Status(grpc::StatusCode::CANCELLED,
+                                       "Split streaming was cancelled"));
+    } else {
+      co_await rpc.finish(grpc::Status(grpc::StatusCode::ABORTED,
+                                       "Network stream interrupted"));
+    }
+  } else if (done_ec) {
+    co_await rpc.finish(grpc::Status(grpc::StatusCode::INTERNAL,
+                                     "Disk reader channel closed prematurely"));
+  } else if (!disk_status.ok()) {
+    co_await rpc.finish(disk_status);
   } else {
-    std::cout << "[Coordinator] Issue sending data. Finishing RPC error."
-              << std::endl;
-    co_await rpc.finish(
-        grpc::Status(grpc::StatusCode::NOT_FOUND, "Issue with sending data"));
+    co_await rpc.finish(grpc::Status::OK);
   }
 }
 
 void CoordinateServer::run() {
   if (data_grpc_context_) {
-    boost::asio::post(thread_pool_, [this] { data_grpc_context_->run(); });
+    data_thread_ = std::jthread{
+        [self = shared_from_this()] { self->data_grpc_context_->run(); }};
   }
 
   agrpc::run(*control_grpc_context_, io_context_);

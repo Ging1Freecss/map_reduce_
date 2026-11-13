@@ -84,9 +84,12 @@ public:
                      std::string listen_address, std::string advertised_host,
                      std::size_t num_threads = 4)
       -> std::shared_ptr<WorkerServer> {
-    return std::shared_ptr<WorkerServer>(new WorkerServer(
+    auto server = std::shared_ptr<WorkerServer>(new WorkerServer(
         std::move(coordinator_endpoint), std::move(listen_address),
         std::move(advertised_host), num_threads));
+
+    server->register_handlers();
+    return server;
   }
 
   auto start_worker() -> boost::asio::awaitable<void>;
