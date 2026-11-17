@@ -84,8 +84,8 @@ void WorkerState::ResetWorkerState() {
   task_assignment_ = std::nullopt;
 }
 
-void WorkerState::SetMapState(wc::TaskAssignment task) {
-  phase_ = Phase::MAP;
+void WorkerState::SetState(wc::TaskAssignment task, Phase phase) {
+  phase_ = phase;
   task_assignment_ = std::move(task);
 }
 

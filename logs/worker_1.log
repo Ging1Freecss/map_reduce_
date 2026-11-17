@@ -2,7 +2,12 @@
 [Worker] Listening on:       0.0.0.0:50053
 [Worker] Advertised host:    127.0.0.1:50053
 [Worker] background_thread_ started
-[Worker] Assigned REDUCE task 1 with 3 partitions. (Reduce phase pending implementation)
-[Worker] Assigned REDUCE task 1 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Assigned REDUCE task 0 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Partition mr-0_0.data already present on local disk.
+[Worker] Partition mr-1_0.data already present on local disk.
+[Worker] Partition mr-2_0.data already present on local disk.
+[Worker] Succeed to download partition mr-0_0.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-1_0.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-2_0.data from 127.0.0.1:50052: 
 
 Shutdown signal received...

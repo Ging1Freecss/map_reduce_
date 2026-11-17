@@ -50,6 +50,12 @@ public:
 
   void register_handlers();
 
+  auto process_map_task(wc::TaskAssignment task)
+      -> boost::asio::awaitable<void>;
+
+  auto process_reduce_task(wc::TaskAssignment task)
+      -> boost::asio::awaitable<void>;
+
 private:
   explicit WorkerServer(std::string coordinator_endpoint,
                         std::string listen_address, std::string advertised_host,

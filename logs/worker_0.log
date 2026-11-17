@@ -36,7 +36,58 @@
 [Worker] Reporting completion with 4 output partition(s)...
 [Worker] Map task 2 completed and accepted by coordinator!
 [Worker] Assigned REDUCE task 0 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Hard-linked local partition mr-0_0.data into reduce input directory.
+[Worker] Hard-linked local partition mr-1_0.data into reduce input directory.
+[Worker] Hard-linked local partition mr-2_0.data into reduce input directory.
+[Worker] Succeed to download partition mr-0_0.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-1_0.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-2_0.data from 127.0.0.1:50052: 
+[Worker] Assigned REDUCE task 2 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Hard-linked local partition mr-0_2.data into reduce input directory.
+[Worker] Hard-linked local partition mr-1_2.data into reduce input directory.
+[Worker] Hard-linked local partition mr-2_2.data into reduce input directory.
+[Worker] Succeed to download partition mr-0_2.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-1_2.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-2_2.data from 127.0.0.1:50052: 
 [Worker] Assigned REDUCE task 3 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Hard-linked local partition mr-0_3.data into reduce input directory.
+[Worker] Hard-linked local partition mr-1_3.data into reduce input directory.
+[Worker] Hard-linked local partition mr-2_3.data into reduce input directory.
+[Worker] Succeed to download partition mr-0_3.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-1_3.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-2_3.data from 127.0.0.1:50052: 
+Starting server streaming of file: mr-1_1.data
+[Worker] Spawning disk read coroutine...
+[Worker] Disk reader coroutine STARTED for "/tmp/mr_worker_intermediate/mr-1_1.data"
+[Worker] calling co_await rpc.write(chunk)
+Starting server streaming of file: mr-0_1.data
+[Worker] Spawning disk read coroutine...
+[Worker] calling co_await rpc.write(chunk)
+[Worker] Disk reader coroutine STARTED for "/tmp/mr_worker_intermediate/mr-0_1.data"
+Starting server streaming of file: mr-2_1.data
+[Worker] Spawning disk read coroutine...
+[Worker] calling co_await rpc.write(chunk)
+[Worker] Disk reader coroutine STARTED for "/tmp/mr_worker_intermediate/mr-2_1.data"
 [Worker] Assigned REDUCE task 0 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Partition mr-0_0.data already present on local disk.
+[Worker] Partition mr-1_0.data already present on local disk.
+[Worker] Partition mr-2_0.data already present on local disk.
+[Worker] Succeed to download partition mr-0_0.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-1_0.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-2_0.data from 127.0.0.1:50052: 
+[Worker] Assigned REDUCE task 2 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Partition mr-0_2.data already present on local disk.
+[Worker] Partition mr-1_2.data already present on local disk.
+[Worker] Partition mr-2_2.data already present on local disk.
+[Worker] Succeed to download partition mr-0_2.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-1_2.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-2_2.data from 127.0.0.1:50052: 
+[Worker] Assigned REDUCE task 3 with 3 partitions. (Reduce phase pending implementation)
+[Worker] Partition mr-0_3.data already present on local disk.
+[Worker] Partition mr-1_3.data already present on local disk.
+[Worker] Partition mr-2_3.data already present on local disk.
+[Worker] Succeed to download partition mr-0_3.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-1_3.data from 127.0.0.1:50052: 
+[Worker] Succeed to download partition mr-2_3.data from 127.0.0.1:50052: 
 
 Shutdown signal received...

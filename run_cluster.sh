@@ -41,7 +41,7 @@ echo "=============================================="
 # 1. Clean previous state
 echo "[1/4] Cleaning previous run artifacts..."
 killall -9 coordinator worker 2>/dev/null || true
-rm -rf /tmp/mr_worker_intermediate data/sample.txt.map_data.* "$LOG_DIR"/*
+rm -rf /tmp/mr_worker_intermediate /tmp/mr_worker_reduce_input data/sample.txt.map_data.* "$LOG_DIR"/*
 
 # 2. Build binaries
 echo "[2/4] Building latest binaries..."

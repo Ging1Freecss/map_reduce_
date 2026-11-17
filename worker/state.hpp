@@ -31,7 +31,7 @@ public:
 
   void ResetWorkerState();
 
-  void SetMapState(wc::TaskAssignment task);
+  void SetState(wc::TaskAssignment task, Phase phase);
   auto ExecuteReduceTask(wc::TaskAssignment &task_assignment_)
       -> wc::CompleteRequest;
 
@@ -45,5 +45,6 @@ public:
   std::optional<wc::TaskAssignment> task_assignment_{std::nullopt};
 
   const std::string map_phase_op_dir{"/tmp/mr_worker_intermediate"};
+  const std::string reduce_phase_ip_dir{"/tmp/mr_worker_reduce_input"};
 };
 } // namespace mr
