@@ -37,10 +37,12 @@
 #include <fstream>
 #include <grpcpp/client_context.h>
 #include <grpcpp/create_channel.h>
+#include <grpcpp/security/credentials.h>
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/server_builder.h>
 #include <grpcpp/support/status.h>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -331,14 +333,7 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
   std::cout << "[Worker] Calling co_await rpc.read(chunk)..." << std::endl;
   while (true) {
 
-    auto cs = co_await boost::asio::this_coro::cancellation_state;
-    if (cs.cancelled() != boost::asio::cancellation_type::none) {
-      stream_aborted = true;
-      break;
-    }
-
     if (!(co_await rpc.read(chunk))) {
-
       break;
     }
 
@@ -437,6 +432,335 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
   co_return network_status;
 }
 
+auto WorkerServer::fetch_input_data_for_reduce(
+    const std::string &peer_endpoint, const std::string &partition_filename)
+    -> boost::asio::awaitable<grpc::Status> {
+
+  // disable throw for asio coroutine
+  co_await boost::asio::this_coro::throw_if_cancelled(false);
+
+  // allow error propagation as it is
+  co_await boost::asio::this_coro::reset_cancellation_state(
+      boost::asio::enable_total_cancellation());
+
+  using RPC = agrpc::ClientRPC<
+      &ww::WorkerShuffleService::Stub::PrepareAsyncFetchPartition>;
+
+  using ChunkChannel = boost::asio::experimental::concurrent_channel<void(
+      boost::system::error_code, std::string)>;
+
+  using DoneChannel = boost::asio::experimental::concurrent_channel<void(
+      boost::system::error_code, bool)>;
+
+  // dynamic gRPC channel and stub
+  auto p2p_channel =
+      grpc::CreateChannel(peer_endpoint, grpc::InsecureChannelCredentials());
+
+  auto p2p_stub = ww::WorkerShuffleService::NewStub(p2p_channel);
+
+  RPC rpc{*data_grpc_context_};
+
+  ww::PartitionRequest request;
+  request.set_partition_filename(partition_filename);
+
+  if (!(co_await rpc.start(*p2p_stub, request))) {
+    co_return co_await rpc.finish();
+  }
+
+  auto channel = std::make_shared<ChunkChannel>(
+      co_await boost::asio::this_coro::executor, 64);
+
+  auto disk_strand = boost::asio::make_strand(thread_pool_);
+
+  auto disk_cancel_signal =
+      std::make_shared<boost::asio::cancellation_signal>();
+  auto done_ch = std::make_shared<DoneChannel>(
+      co_await boost::asio::this_coro::executor, 1);
+
+  // local destination path
+  const std::filesystem::path dest_file =
+      std::filesystem::path(worker_state_.map_phase_op_dir) /
+      partition_filename;
+
+  boost::asio::co_spawn(
+      disk_strand,
+      [channel, done_ch, dest_file]() -> boost::asio::awaitable<void> {
+        co_await boost::asio::this_coro::throw_if_cancelled(false);
+        std::ofstream file;
+
+        auto return_value = [&](bool val) -> boost::asio::awaitable<void> {
+          if (file.is_open()) {
+            file.close();
+          }
+          co_await boost::asio::this_coro::reset_cancellation_state(
+              boost::asio::disable_cancellation());
+          channel->close();
+          co_await done_ch->async_send(
+              boost::system::error_code{}, val,
+              boost::asio::as_tuple(boost::asio::use_awaitable));
+          done_ch->close();
+        };
+
+        if (dest_file.has_parent_path()) {
+          std::error_code fs_ec;
+          std::filesystem::create_directories(dest_file.parent_path(), fs_ec);
+          if (fs_ec) {
+            channel->close();
+            co_await return_value(false);
+            co_return;
+          }
+        }
+
+        file.open(dest_file, std::ios::binary | std::ios::trunc);
+
+        if (!file.is_open()) {
+          channel->close();
+          co_await return_value(false);
+          co_return;
+        }
+
+        while (true) {
+          auto [ec, payload] = co_await channel->async_receive(
+              boost::asio::as_tuple(boost::asio::use_awaitable));
+
+          if (ec) {
+            auto cancel_state =
+                co_await boost::asio::this_coro::cancellation_state;
+
+            if (cancel_state.cancelled() !=
+                boost::asio::cancellation_type::none) {
+              co_await return_value(false);
+              co_return;
+            }
+
+            if (ec == boost::asio::experimental::error::channel_closed) {
+              break; //  EOF
+            }
+
+            co_await return_value(false);
+            co_return;
+          }
+
+          file.write(payload.data(), payload.size());
+          if (file.fail()) {
+            co_await return_value(false);
+            co_return;
+          }
+
+          file.close();
+          co_await return_value(!file.fail());
+          co_return;
+        }
+      },
+      boost::asio::bind_cancellation_slot(
+          disk_cancel_signal->slot(),
+          [channel, done_ch](std::exception_ptr ep) {
+            if (ep) {
+              channel->close();
+              done_ch->try_send(boost::system::error_code{}, false);
+              done_ch->close();
+            }
+          }));
+
+  ww::PartitionChunk chunk;
+  bool stream_aborted{false};
+
+  while (true) {
+    if (!(co_await rpc.read(chunk))) {
+      break; // EOF
+    }
+    auto [send_ec] = co_await channel->async_send(
+        boost::system::error_code{}, std::move(*chunk.mutable_payload()),
+        boost::asio::as_tuple(boost::asio::use_awaitable));
+    if (send_ec) {
+      stream_aborted = true;
+      break;
+    }
+  }
+
+  auto cancel_state = co_await boost::asio::this_coro::cancellation_state;
+
+  const bool was_cancelled =
+      (cancel_state.cancelled() != boost::asio::cancellation_type::none);
+
+  co_await boost::asio::this_coro::reset_cancellation_state(
+      boost::asio::disable_cancellation());
+
+  if (was_cancelled || stream_aborted) {
+    co_await boost::asio::co_spawn(
+        disk_strand,
+        [disk_cancel_signal]() -> boost::asio::awaitable<void> {
+          disk_cancel_signal->emit(boost::asio::cancellation_type::terminal);
+          co_return;
+        },
+        boost::asio::use_awaitable);
+    channel->cancel();
+    rpc.cancel();
+  }
+
+  channel->close();
+
+  grpc::Status network_status = co_await rpc.finish();
+
+  auto [ec, disk_completed] = co_await done_ch->async_receive(
+      boost::asio::as_tuple(boost::asio::use_awaitable));
+  done_ch->close();
+
+  if (was_cancelled || stream_aborted || !disk_completed ||
+      !network_status.ok()) {
+    co_await boost::asio::co_spawn(
+        disk_strand,
+        [dest_file]() -> boost::asio::awaitable<void> {
+          std::error_code rm_ec;
+          std::filesystem::remove(dest_file, rm_ec);
+          co_return;
+        },
+        boost::asio::use_awaitable);
+    if (was_cancelled) {
+      co_return grpc::Status(grpc::StatusCode::CANCELLED,
+                             "Fetch partition cancelled");
+    }
+    if (!disk_completed) {
+      co_return grpc::Status(grpc::StatusCode::DATA_LOSS,
+                             "Disk write failed for " + dest_file.string());
+    }
+    if (!network_status.ok()) {
+      co_return network_status;
+    }
+    co_return grpc::Status(grpc::StatusCode::ABORTED,
+                           "Failed while streaming partition");
+  }
+  co_return network_status;
+}
+
+auto WorkerServer::fetch_all_input_for_reduce() -> boost::asio::awaitable<
+    std::optional<std::vector<MapPhaseOutputFilesStatus>>> {
+
+  std::error_code dir_ec;
+  std::filesystem::create_directories(worker_state_.map_phase_op_dir, dir_ec);
+
+  if (!worker_state_.task_assignment_) {
+    co_return std::nullopt;
+  }
+
+  const auto &task = worker_state_.task_assignment_.value();
+  const auto &uris = task.intermediate_paths();
+  const int num_uris = uris.size();
+
+  if (num_uris == 0) {
+    co_return std::vector<MapPhaseOutputFilesStatus>{};
+  }
+
+  // UPFRONT VALIDATION: Fail before launching any background tasks
+  std::vector<ParsedPartitionUri> parsed_uris;
+  parsed_uris.reserve(num_uris);
+  for (int i = 0; i < num_uris; ++i) {
+    auto parsed_res = worker_state_.ValidateParseP2pUri(uris[i], task.task_id(),
+                                                        task.num_map_tasks());
+    if (!parsed_res) {
+      std::cerr << "[Worker] FATAL: Invalid URI in manifest: "
+                << parsed_res.error() << std::endl;
+      co_return std::nullopt;
+    }
+    parsed_uris.push_back(std::move(parsed_res.value()));
+  }
+
+  auto ex = co_await boost::asio::this_coro::executor;
+  auto cs = co_await boost::asio::this_coro::cancellation_state;
+
+  auto child_signals =
+      std::make_shared<std::vector<boost::asio::cancellation_signal>>(num_uris);
+
+  if (cs.slot().is_connected()) {
+    cs.slot().assign([child_signals](boost::asio::cancellation_type type) {
+      for (auto &sig : *child_signals) {
+        sig.emit(type);
+      }
+    });
+  }
+
+  // clear parent slot on return
+  struct SlotCleaner {
+    boost::asio::cancellation_slot slot;
+    ~SlotCleaner() {
+      if (slot.is_connected()) {
+        slot.clear();
+      }
+    }
+  } cleaner{cs.slot()};
+
+  using ResultChannel = boost::asio::experimental::concurrent_channel<void(
+      boost::system::error_code, MapPhaseOutputFilesStatus)>;
+
+  auto channel = std::make_shared<ResultChannel>(ex, num_uris);
+  for (std::size_t i = 0; i < num_uris; i++) {
+
+    const auto &parsed = parsed_uris[i];
+    std::filesystem::path local_path =
+        std::filesystem::path(worker_state_.map_phase_op_dir) / parsed.filename;
+
+    // already downloaded or generated locally
+    std::error_code check_ec;
+    if (std::filesystem::is_regular_file(local_path, check_ec) && !check_ec) {
+      std::cout << "[Worker] Partition " << parsed.filename
+                << " already present on local disk.\n";
+
+      channel->try_send(boost::system::error_code{},
+                        MapPhaseOutputFilesStatus{parsed, grpc::Status::OK});
+      continue;
+    }
+
+    // output of map phase by this worker itself
+    if (parsed.peer_endpoint == advertised_host_) {
+
+      channel->try_send(
+          boost::system::error_code{},
+          MapPhaseOutputFilesStatus{
+              parsed,
+              grpc::Status(grpc::StatusCode::NOT_FOUND,
+                           "file was supposed to be our own local map file")});
+      continue;
+    }
+
+    boost::asio::co_spawn(
+        bg_io_context_,
+        [self = shared_from_this(), channel,
+         parsed]() -> boost::asio::awaitable<void> {
+          grpc::Status status = co_await self->fetch_input_data_for_reduce(
+              parsed.peer_endpoint, parsed.filename);
+
+          co_await channel->async_send(
+              boost::system::error_code{},
+              MapPhaseOutputFilesStatus{parsed, status},
+              boost::asio::use_awaitable);
+        },
+        boost::asio::bind_cancellation_slot((*child_signals)[i].slot(),
+                                            boost::asio::detached));
+  }
+
+  std::vector<MapPhaseOutputFilesStatus> result_vector;
+  result_vector.reserve(num_uris);
+
+  for (int i = 0; i < uris.size(); i++) {
+    auto [ec, res] = co_await channel->async_receive(
+        boost::asio::as_tuple(boost::asio::use_awaitable));
+
+    if (ec) {
+      if (ec == boost::asio::error::operation_aborted ||
+          cs.cancelled() != boost::asio::cancellation_type::none) {
+        std::cerr << "[Worker] Partition ingestion cancelled.\n";
+        co_return std::nullopt; // Clean cancellation exit
+      }
+      throw std::runtime_error("[Worker] Channel receive error: " +
+                               ec.message());
+    }
+
+    result_vector.push_back(std::move(res));
+  }
+
+  co_return result_vector;
+}
+
 auto WorkerServer::start_worker() -> boost::asio::awaitable<void> {
 
   auto ex = co_await boost::asio::this_coro::executor;
@@ -497,8 +821,8 @@ auto WorkerServer::start_worker() -> boost::asio::awaitable<void> {
       std::optional<wc::CompleteRequest> map_res =
           co_await boost::asio::co_spawn(
               thread_pool_,
-              [this]()
-                  -> boost::asio::awaitable<std::optional<wc::CompleteRequest>> {
+              [this]() -> boost::asio::awaitable<
+                           std::optional<wc::CompleteRequest>> {
                 co_return worker_state_.ExecuteMapTask();
               },
               boost::asio::use_awaitable);
@@ -535,11 +859,12 @@ auto WorkerServer::start_worker() -> boost::asio::awaitable<void> {
                 << " with " << task.intermediate_paths_size()
                 << " partitions. (Reduce phase pending implementation)"
                 << std::endl;
-      boost::asio::steady_timer delay{
-          co_await boost::asio::this_coro::executor};
-      delay.expires_after(std::chrono::seconds(5));
-      co_await delay.async_wait(boost::asio::use_awaitable);
-      continue;
+
+      worker_state_.task_assignment_ = task;
+      co_await boost::asio::co_spawn(
+          bg_io_context_, fetch_all_input_for_reduce(),
+          boost::asio::bind_cancellation_slot(signal_->slot(),
+                                              boost::asio::use_awaitable));
     }
   }
   co_return;
@@ -713,8 +1038,7 @@ auto WorkerServer::handle_fetch_partition(FetchPartitionRPC &rpc,
                                              "Invalid partition filename"));
           co_return;
         }
-        // and use !std::filesystem::is_regular_file(file_path, fs_ec) instead
-        // of exists()
+
         std::filesystem::path intermediate_dir =
             self->worker_state_.map_phase_op_dir;
         std::filesystem::path file_path = intermediate_dir / safe_filename;

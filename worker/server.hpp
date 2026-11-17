@@ -16,6 +16,7 @@
 #include <expected>
 #include <grpcpp/support/status.h>
 #include <memory>
+#include <optional>
 #include <thread>
 namespace mr {
 class WorkerServer : public std::enable_shared_from_this<WorkerServer> {
@@ -31,27 +32,15 @@ public:
   auto fetch_map_data(wc::SplitDataRequest &request)
       -> boost::asio::awaitable<grpc::Status>;
 
-  // rpc CompleteTask(CompleteRequest) returns (CompleteReply);
+  auto fetch_input_data_for_reduce(const std::string &peer_endpoint,
+                                   const std::string &partition_filename)
+      -> boost::asio::awaitable<grpc::Status>;
+
+  auto fetch_all_input_for_reduce() -> boost::asio::awaitable<
+      std::optional<std::vector<MapPhaseOutputFilesStatus>>>;
 
   auto poll_complete_task(wc::CompleteRequest &request)
       -> boost::asio::awaitable<std::expected<wc::CompleteReply, grpc::Status>>;
-  /*
-    // Reduce worker asks Map worker for an intermediate partition file
-  message PartitionRequest {
-    string partition_filename = 1; // e.g., "mr-0_1.data"
-  }
-
-  // Streamed intermediate key-value bytes
-  message PartitionChunk {
-    bytes payload = 1; // 64 KB slice of intermediate partition
-  }
-
-  // Internal service hosted by every Worker node
-  service WorkerShuffleService {
-    // P2P Data Streaming (Map Worker -> Reduce Worker)
-    rpc FetchPartition(PartitionRequest) returns (stream PartitionChunk);
-  }
-  */
 
   using FetchPartitionRPC = agrpc::ServerRPC<
       &ww::WorkerShuffleService::AsyncService::RequestFetchPartition>;
@@ -65,19 +54,6 @@ private:
   explicit WorkerServer(std::string coordinator_endpoint,
                         std::string listen_address, std::string advertised_host,
                         std::size_t num_threads);
-
-  /*
-   static std::shared_ptr<CoordinateServer>
-  create(std::string host, std::size_t num_threads,
-         std::shared_ptr<CoordinatorState> state) {
-    auto server = std::shared_ptr<CoordinateServer>(
-        new CoordinateServer(std::move(host), num_threads, std::move(state)));
-
-    // Safely initialize async handlers and timers with shared_from_this()
-    server->init();
-    return server;
-  }
-  */
 
 public:
   static auto create(std::string coordinator_endpoint,

@@ -2,10 +2,26 @@
 
 #include "mr_coordination.pb.h"
 #include <cstdint>
+#include <expected>
+#include <grpcpp/support/status.h>
 #include <optional>
 namespace mr {
 
 enum class Phase { IDLE, MAP, REDUCE, SHUFFLEFIX, DONE };
+
+// in reduce phase when downloading data from map workers
+struct ParsedPartitionUri {
+  std::string peer_endpoint;
+  std::string filename;
+  std::optional<std::int64_t> map_id{std::nullopt};
+  std::optional<std::int64_t> reduce_id{std::nullopt};
+};
+
+struct MapPhaseOutputFilesStatus {
+  ParsedPartitionUri data;
+  grpc::Status status;
+};
+
 class WorkerState {
 public:
   auto ExecuteMapTask() -> std::optional<wc::CompleteRequest>;
@@ -19,6 +35,10 @@ public:
   auto ExecuteReduceTask(wc::TaskAssignment &task_assignment_)
       -> wc::CompleteRequest;
 
+  auto ValidateParseP2pUri(const std::string &uri,
+                           std::int64_t expected_reducer_id,
+                           std::int32_t num_map_tasks)
+      -> std::expected<ParsedPartitionUri, std::string>;
   Phase phase_{Phase::IDLE};
   std::string worker_id_;
   std::string advertised_host_;
