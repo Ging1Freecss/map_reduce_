@@ -1020,6 +1020,7 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
               << file_status.status.error_message() << std::endl;
   }
 }
+
 void WorkerServer::register_handlers() {
   agrpc::register_awaitable_rpc_handler<FetchPartitionRPC>(
       *data_grpc_context_, data_shuffle_service_,
