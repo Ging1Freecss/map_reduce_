@@ -32,19 +32,24 @@ public:
   void ResetWorkerState();
 
   void SetState(wc::TaskAssignment task, Phase phase);
-  auto ExecuteReduceTask(wc::TaskAssignment &task_assignment_)
-      -> wc::CompleteRequest;
 
   auto ValidateParseP2pUri(const std::string &uri,
                            std::int64_t expected_reducer_id,
                            std::int32_t num_map_tasks)
       -> std::expected<ParsedPartitionUri, std::string>;
+
+  auto ExecuteReduceTask(const std::vector<std::filesystem::path> &file_path)
+      -> std::optional<wc::CompleteRequest>;
+  auto ReduceOutputFileName(std::size_t reduce_id) -> std::string;
+
   Phase phase_{Phase::IDLE};
   std::string worker_id_;
   std::string advertised_host_;
   std::optional<wc::TaskAssignment> task_assignment_{std::nullopt};
 
-  const std::string map_phase_op_dir{"/tmp/mr_worker_intermediate"};
-  const std::string reduce_phase_ip_dir{"/tmp/mr_worker_reduce_input"};
+  const std::string map_phase_op_dir{"/var/tmp/mr_worker_intermediate"};
+  const std::string reduce_phase_ip_dir{"/var/tmp/mr_worker_reduce_input"};
+  const std::string reduce_phase_out_dir{"/var/tmp/mr_worker_reduce_output"};
+  std::optional<std::string> output_reduce_path_{std::nullopt};
 };
 } // namespace mr

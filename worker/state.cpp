@@ -1,5 +1,7 @@
 #include "state.hpp"
+#include "engine/StreamingValueIterator.hpp"
 #include "engine/map_emit_context.hpp"
+#include "engine/reduce_emit_context.hpp"
 #include "mr_coordination.pb.h"
 #include <fstream>
 #include <optional>
@@ -82,6 +84,7 @@ auto WorkerState::GetMapTaskInputFileName(const std::string &input_file,
 void WorkerState::ResetWorkerState() {
   phase_ = Phase::IDLE;
   task_assignment_ = std::nullopt;
+  output_reduce_path_ = std::nullopt;
 }
 
 void WorkerState::SetState(wc::TaskAssignment task, Phase phase) {
@@ -89,6 +92,51 @@ void WorkerState::SetState(wc::TaskAssignment task, Phase phase) {
   task_assignment_ = std::move(task);
 }
 
+auto WorkerState::ExecuteReduceTask(
+    const std::vector<std::filesystem::path> &file_path)
+    -> std::optional<wc::CompleteRequest> {
+
+  if (!task_assignment_) {
+    throw std::runtime_error("task is not set");
+  }
+
+  auto &task = task_assignment_.value();
+  WordCountReducer<StreamingValueIterator> reducer;
+  ReduceEmitContext reduce_ctx{static_cast<std::size_t>(task.task_id()),
+                               reduce_phase_out_dir};
+
+  StreamingValueIterator iter{file_path};
+
+  while (iter.has_more_keys()) {
+    std::string_view key = iter.current_key();
+    auto res = reducer.reduce(key, iter, reduce_ctx);
+
+    if (!res) // io error
+      throw std::runtime_error("issue in reducer");
+
+    // goes to next key
+    iter.current_index();
+  }
+
+  if (!reduce_ctx.commit()) {
+    throw std::runtime_error("issue in commit after reduce");
+  }
+  wc::CompleteRequest request;
+  request.set_task_id(task.task_id());
+  request.set_generation_id(task.generation_id());
+  request.set_type(wc::TaskType::REDUCE);
+  // Exactly 1 path: the final committed output file
+  std::string output_path = ReduceOutputFileName(task.task_id());
+  output_reduce_path_ = output_path;
+  request.add_output_paths(std::move(output_path));
+  return request;
+}
+
+auto WorkerState::ReduceOutputFileName(std::size_t reduce_id) -> std::string {
+  return (std::filesystem::path(reduce_phase_out_dir) /
+          ("mr-out-" + std::to_string(reduce_id)))
+      .string();
+}
 auto WorkerState::ValidateParseP2pUri(const std::string &uri,
                                       std::int64_t expected_reducer_id,
                                       std::int32_t num_map_tasks)

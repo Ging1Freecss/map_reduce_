@@ -556,11 +556,10 @@ auto WorkerServer::fetch_input_data_for_reduce(
             co_await return_value(false);
             co_return;
           }
-
-          file.close();
-          co_await return_value(!file.fail());
-          co_return;
         }
+        file.close();
+        co_await return_value(!file.fail());
+        co_return;
       },
       boost::asio::bind_cancellation_slot(
           disk_cancel_signal->slot(),
@@ -977,10 +976,18 @@ auto WorkerServer::process_map_task(wc::TaskAssignment task)
 
   std::cout << "[Worker] Map task " << task.task_id()
             << " completed and accepted by coordinator!" << std::endl;
-  std::error_code rm_ec;
-  std::filesystem::remove(
-      worker_state_.GetMapTaskInputFileName(task.input_file(), task.task_id()),
-      rm_ec);
+
+  co_await boost::asio::co_spawn(
+      thread_pool_,
+      [self = shared_from_this(), &task]() -> boost::asio::awaitable<void> {
+        std::error_code rm_ec;
+        std::filesystem::remove(self->worker_state_.GetMapTaskInputFileName(
+                                    task.input_file(), task.task_id()),
+                                rm_ec);
+
+        co_return;
+      },
+      boost::asio::use_awaitable);
 
   worker_state_.ResetWorkerState();
 }
@@ -1003,6 +1010,8 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
     throw std::runtime_error("issue when downloading map phase output");
   }
 
+  std::vector<std::filesystem::path> reduce_phase_files;
+
   for (const auto &file_status : downloaded_files.value()) {
     if (!file_status.status.ok()) {
       std::cerr << "[Worker] Failed to download partition "
@@ -1013,12 +1022,61 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
       throw std::runtime_error("Failed to fetch partition: " +
                                file_status.data.filename);
     }
-
+    reduce_phase_files.push_back(
+        std::filesystem::path(worker_state_.reduce_phase_ip_dir) /
+        file_status.data.filename);
     std::cout << "[Worker] Succeed to download partition "
               << file_status.data.filename << " from "
               << file_status.data.peer_endpoint << ": "
               << file_status.status.error_message() << std::endl;
   }
+
+  // execute reduce task
+  std::optional<wc::CompleteRequest> reduce_res =
+      co_await boost::asio::co_spawn(
+          thread_pool_,
+          [self = shared_from_this(), &reduce_phase_files]()
+              -> boost::asio::awaitable<std::optional<wc::CompleteRequest>> {
+            co_return self->worker_state_.ExecuteReduceTask(reduce_phase_files);
+          },
+          boost::asio::use_awaitable);
+
+  if (!reduce_res)
+    throw std::runtime_error("error in reduce phase");
+
+  wc::CompleteRequest &complete_request = reduce_res.value();
+  std::cout << "[Worker] Reporting completion with "
+            << complete_request.output_paths_size() << " output partition(s)..."
+            << std::endl;
+
+  auto res_complete_task = co_await poll_complete_task(complete_request);
+
+  if (!res_complete_task) {
+    throw std::runtime_error("error in poll_complete_task, grpc::Status: " +
+                             res_complete_task.error().error_message());
+  }
+
+  wc::CompleteReply &complete_reply = res_complete_task.value();
+  if (!complete_reply.accepted()) {
+    throw std::runtime_error("Coordinator rejected CompleteTask");
+  }
+
+  std::cout << "[Worker] Reduce phase completed" << std::endl;
+
+  co_await boost::asio::co_spawn(
+      thread_pool_,
+      [self = shared_from_this(), &task,
+       &reduce_phase_files]() -> boost::asio::awaitable<void> {
+        for (int i = 0; i < reduce_phase_files.size(); i++) {
+          std::error_code rm_ec;
+          std::filesystem::remove(reduce_phase_files[i], rm_ec);
+        }
+
+        co_return;
+      },
+      boost::asio::use_awaitable);
+
+  worker_state_.ResetWorkerState();
 }
 
 void WorkerServer::register_handlers() {

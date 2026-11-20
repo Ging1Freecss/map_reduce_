@@ -3,11 +3,13 @@
 #include "core/emit_context.hpp"
 #include "core/reducer.hpp"
 #include "core/value_iterator.hpp"
+#include "engine/StreamingValueIterator.hpp"
 #include "engine/vector_value_iterator.hpp"
 #include "storage/error.hpp"
 #include "storage/record_reader.hpp"
 #include "storage/staged_record_writer.hpp"
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <expected>
 #include <filesystem>
@@ -125,11 +127,30 @@ inline auto run_reduce_phase(std::filesystem::path base_dir,
   return res;
 }
 
-// template <IsEmitter Emitter = ReduceEmitContext>
-// inline auto
-// run_reduce_phase_with_external_sort(std::filesystem::path base_dir,
-//                                     std::size_t reduce_id, std::size_t
-//                                     num_maps, IsReducer<Iter, Emitter> auto
-//                                     &reducer, std::size_t buffer_size = 64 *
-//                                     1024) {}
+template <IsEmitter Emitter = ReduceEmitContext,
+          IsValueIterator Iter = StreamingValueIterator>
+inline auto run_reduce_phase_with_external_sort(
+    std::filesystem::path base_dir, std::size_t reduce_id, std::size_t num_maps,
+    IsReducer<Iter, Emitter> auto &reducer,
+    std::vector<std::filesystem::path> &file_path,
+    std::size_t buffer_size = 64 * 1024) -> std::expected<void, StorageError> {
+  assert(num_maps == file_path.size() &&
+         "issue with number of file path given, not equal to map number");
+
+  ReduceEmitContext reduce_ctx{reduce_id, base_dir, buffer_size};
+  StreamingValueIterator iter{file_path};
+
+  while (iter.has_more_keys()) {
+    std::string_view key = iter.current_key();
+    auto res = reducer.reduce(key, iter, reduce_ctx);
+
+    if (!res) // io error
+      return std::unexpected(res.error());
+
+    // goes to next key
+    iter.current_index();
+  }
+
+  return reduce_ctx.commit();
+}
 } // namespace mr
