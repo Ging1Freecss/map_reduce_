@@ -165,13 +165,14 @@ auto CoordinateServer::handle_shuffle_error_fix(ShuffleErrorFixRPC &rpc,
       coordinate_state_->GetUpdatedReduceTaskForWorker(request);
 
   if (task.type() == wc::TaskType::WAIT) {
-    std::cout << "[Coordinator] Shuffle Fix for " << request.worker_id()
+    std::cout << "[Coordinator] ⏳ Shuffle Fix for " << request.worker_id()
               << " (Gen " << request.generation_id()
-              << "): Still Waiting on Map\n";
+              << "): Still Waiting on Map task recomputation...\n";
   } else {
-    std::cout << "[Coordinator] Shuffle Fix for " << request.worker_id()
+    std::cout << "[Coordinator] 🔄 Shuffle Fix for " << request.worker_id()
               << " (Gen " << request.generation_id()
-              << "): Assigning Reduce Task " << task.task_id() << "\n";
+              << "): Recomputation complete! Returning updated manifest with "
+              << task.intermediate_paths_size() << " partitions.\n";
   }
   co_await rpc.finish(task, grpc::Status::OK);
 }
@@ -196,6 +197,12 @@ auto CoordinateServer::handle_complete_task(CompleteTaskRPC &rpc,
 auto CoordinateServer::handle_report_shuffle_error(
     ReportShuffleErrorRPC &rpc, wc::ShuffleErrorReport &request)
     -> boost::asio::awaitable<void> {
+  std::cout << "[Coordinator] 🚨 ShuffleErrorReport received: Reducer "
+            << request.reduce_task_id() << " cannot reach partition "
+            << request.missing_path() << " (Map Task "
+            << request.failed_map_task_id()
+            << ") -> Resetting map task to IDLE, entering SHUFFLEFIX!"
+            << std::endl;
   wc::ShuffleErrorReply response =
       coordinate_state_->ReducePhaseShuffleError(request);
   co_await rpc.finish(response, grpc::Status::OK);
@@ -211,7 +218,14 @@ auto CoordinateServer::handle_fetch_input_split(FetchInputSplitRPC &rpc,
             << request.task_id() << " gen=" << request.generation_id()
             << std::endl;
 
-  if (!coordinate_state_->ValidateSplitRequest(request)) {
+  const bool is_valid = co_await boost::asio::co_spawn(
+      io_context_,
+      [this, &request]() -> boost::asio::awaitable<bool> {
+        co_return coordinate_state_->ValidateSplitRequest(request);
+      },
+      boost::asio::use_awaitable);
+
+  if (!is_valid) {
     std::cout << "[Coordinator] ValidateSplitRequest FAILED for task_id="
               << request.task_id() << std::endl;
     co_await rpc.finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,

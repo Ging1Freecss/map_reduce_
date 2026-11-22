@@ -536,14 +536,24 @@ auto WorkerServer::shuffle_phase_loop(
           reply.set_error_message("map task data is not there , error msg " +
                                   status.error_message());
 
+          std::cout << "[Worker] 🚨 Escalating shuffle failure: reporting missing map_task "
+                    << data.map_id.value() << " (" << data.filename
+                    << ") to Coordinator..." << std::endl;
+
           std::expected<wc::ShuffleErrorReply, grpc::Status> res =
               co_await self->poll_report_shuffle_error(reply);
 
           if (!res || !res->acknowledged()) {
+            std::cout << "[Worker] ❌ Coordinator rejected ShuffleErrorReport"
+                      << std::endl;
             co_await channel->async_send(boost::system::error_code{},
                                          std::nullopt);
             co_return;
           }
+          std::cout << "[Worker] 📩 Coordinator acknowledged shuffle error for map_task "
+                    << data.map_id.value()
+                    << ". Reducer entering SHUFFLEFIX wait loop..."
+                    << std::endl;
           co_await channel->async_send(boost::system::error_code{},
                                        res.value());
         },
@@ -695,6 +705,9 @@ auto WorkerServer::fetch_input_data_for_reduce(
 
   ww::PartitionRequest request;
   request.set_partition_filename(partition_filename);
+
+  rpc.context().set_deadline(std::chrono::system_clock::now() +
+                             std::chrono::seconds(10));
 
   if (!(co_await rpc.start(*p2p_stub, request))) {
     co_return co_await rpc.finish();
@@ -1248,7 +1261,11 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
   for (const auto &file_status : downloaded_files.value()) {
     if (!file_status.status.ok()) {
       download_status = false;
-      std::cerr << "[Worker] Failed to download partition ..." << std::endl;
+      std::cout << "[Worker] ❌ Failed to download partition "
+                << file_status.data.filename << " from "
+                << file_status.data.peer_endpoint
+                << " (Error: " << file_status.status.error_message() << ")"
+                << std::endl;
       break;
     }
     reduce_phase_files.push_back(

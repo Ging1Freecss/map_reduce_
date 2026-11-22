@@ -1,10 +1,50 @@
+# Build Artifacts & CMake
 build/
+build*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
 compile_commands.json
+
+# Dependencies & Package Managers
+vcpkg_installed/
+
+# C/C++ Compiler & Tooling
+*.o
+*.a
+*.so
+*.dylib
 .cache/
+.clangd/
+
+# MapReduce Outputs & Intermediate Data
+mr_output/
 mr-tmp/
 mr-out-*
 mr-*-*
-vcpkg_installed/
-build/
-CMakeFiles/
-CMakeCache.txt
+*.data
+*.map_data.*
+.tmp_stage_*
+
+# Logs
+logs/
+*.log
+
+# Test, Ground Truth & Inspection Artifacts
+golden_reference.txt
+golden_sorted.txt
+cluster_sorted.txt
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# OS & Editor Backups
+.DS_Store
+*.swp
+*~
+*.bak
