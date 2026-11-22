@@ -9,8 +9,6 @@ asio_grpc_protobuf_generate(
     ${CMAKE_BINARY_DIR}/vcpkg_installed/x64-linux/include
     /home/hp/vcpkg/installed/x64-linux/include
     PROTOS
-    helloworld.proto
-    mapreduce.proto
     shuffle.proto
     mr_coordination.proto
 )
