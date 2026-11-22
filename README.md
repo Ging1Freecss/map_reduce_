@@ -183,11 +183,22 @@ When an intermediate Map worker crashes during the shuffle phase, the cluster re
 ### Fault Recovery State & Control Graph
 
 ```mermaid
-flowchart LR
-    A["1. P2P Fetch Fails<br/>(10s timeout / peer crash)"] -->|ReportShuffleError| B["2. Coordinator: SHUFFLEFIX<br/>(Map ➔ IDLE, Gen Bumped)"]
-    B -->|PollTask| C["3. Spare Worker<br/>Recomputes Map Task"]
-    C -->|CompleteTask| D["4. Phase ➔ REDUCE<br/>(Manifest Updated)"]
-    D -->|ShuffleErrorFix| E["5. Reducer Fetches New Shard<br/>& Commits Final Output"]
+flowchart TD
+    subgraph Escalation ["1. Failure Detection & Invalidation"]
+        direction LR
+        N1["💥 Peer Worker Crash<br/>(Connection drop / 10s deadline)"] 
+        --> N2["🚨 Reducer Escalation<br/>(Sends ReportShuffleError)"]
+        --> N3["⚙️ Coordinator SHUFFLEFIX<br/>(Failed Map ➔ IDLE, Gen bumped)"]
+    end
+
+    subgraph Recovery ["2. Recomputation & Re-attachment"]
+        direction LR
+        N4["🔄 Spare Worker Recomputation<br/>(Executes Map & Advertises New Port)"]
+        --> N5["📋 Manifest Refresh<br/>(All Maps Done ➔ Phase: REDUCE)"]
+        --> N6["✅ Reducer Re-attachment<br/>(ShuffleErrorFix ➔ Fetch & Commit)"]
+    end
+
+    Escalation ==>|Coordinator reassigns task| Recovery
 ```
 
 <details>
