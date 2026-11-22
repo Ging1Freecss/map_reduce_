@@ -162,17 +162,17 @@ auto CoordinateServer::handle_shuffle_error_fix(ShuffleErrorFixRPC &rpc,
                                                 wc::ShuffleFixRequest &request)
     -> boost::asio::awaitable<void> {
   wc::TaskAssignment task =
-      std::move(coordinate_state_->GetUpdatedReduceTaskForWorker(request));
+      coordinate_state_->GetUpdatedReduceTaskForWorker(request);
 
   if (task.type() == wc::TaskType::WAIT) {
-
-    std::cout << "[Coordinator] Shuffle Error from " << request.worker_id()
-              << "Generation ID: " << request.generation_id() << " To WAIT";
+    std::cout << "[Coordinator] Shuffle Fix for " << request.worker_id()
+              << " (Gen " << request.generation_id()
+              << "): Still Waiting on Map\n";
+  } else {
+    std::cout << "[Coordinator] Shuffle Fix for " << request.worker_id()
+              << " (Gen " << request.generation_id()
+              << "): Assigning Reduce Task " << task.task_id() << "\n";
   }
-
-  std::cout << "[Coordinator] Shuffle Error from " << request.worker_id()
-            << "Generation ID: " << request.generation_id()
-            << " To AssignTask: " << task.task_id();
   co_await rpc.finish(task, grpc::Status::OK);
 }
 

@@ -510,7 +510,9 @@ auto WorkerServer::shuffle_phase_loop(
 
   for (std::size_t i = 0; i < num_file; i++) {
     if (file_data[i].status.ok()) {
-      channel->try_send(boost::system::error_code{}, grpc::Status::OK);
+      wc::ShuffleErrorReply reply;
+      reply.set_acknowledged(true);
+      channel->try_send(boost::system::error_code{}, reply);
       continue;
     }
 
@@ -537,7 +539,7 @@ auto WorkerServer::shuffle_phase_loop(
           std::expected<wc::ShuffleErrorReply, grpc::Status> res =
               co_await self->poll_report_shuffle_error(reply);
 
-          if (!res || !res.error().ok()) {
+          if (!res || !res->acknowledged()) {
             co_await channel->async_send(boost::system::error_code{},
                                          std::nullopt);
             co_return;
@@ -559,6 +561,7 @@ auto WorkerServer::shuffle_phase_loop(
       if (ec == boost::asio::error::operation_aborted ||
           cs.cancelled() != boost::asio::cancellation_type::none) {
         std::cerr << "[Worker] Partition ingestion cancelled.\n";
+        co_return std::nullopt;
       }
       throw std::runtime_error("[Worker] Channel receive error: " +
                                ec.message());
@@ -569,8 +572,13 @@ auto WorkerServer::shuffle_phase_loop(
     }
   }
 
-  int numer_of_retries = 0;
+  int number_of_retries = 0;
   while (true) {
+
+    if (cs.cancelled() != boost::asio::cancellation_type::none) {
+      co_return std::nullopt;
+    }
+
     wc::ShuffleFixRequest request;
     /*
       // worker asks for its specific assigned Reduce task with updated URIs
@@ -580,14 +588,18 @@ message ShuffleFixRequest {
   int64 generation_id = 3;
 }
     */
+    request.set_worker_id(worker_state_.worker_id_);
+    request.set_reduce_task_id(worker_state_.task_assignment_->task_id());
+    request.set_generation_id(worker_state_.task_assignment_->generation_id());
+
     std::expected<wc::TaskAssignment, grpc::Status> res =
         co_await poll_shuffle_error_fix(request);
 
     if (!res) {
 
-      ++numer_of_retries;
+      ++number_of_retries;
 
-      if (numer_of_retries == 3) {
+      if (number_of_retries == 3) {
         throw std::runtime_error("Connection with coodinator issue");
       }
 
@@ -597,6 +609,10 @@ message ShuffleFixRequest {
 
       continue;
     }
+
+    // important as even for successfull report map lead to error in
+    // downloading map phase op file, but number of retries cause issue
+    number_of_retries = 0;
 
     wc::TaskAssignment &task = res.value();
 
@@ -628,7 +644,11 @@ message ShuffleFixRequest {
     }
     std::vector<std::filesystem::path> reduce_phase_files;
 
-    for (const auto &file_status : fetch_res.value()) {
+    // important as we need to update the current status of each file data
+    // for each request
+    file_data = std::move(fetch_res.value());
+
+    for (const auto &file_status : file_data) {
       if (!file_status.status.ok()) {
         co_return std::nullopt;
       }
@@ -1224,9 +1244,12 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
 
   std::vector<std::filesystem::path> reduce_phase_files;
   bool download_status = true;
+
   for (const auto &file_status : downloaded_files.value()) {
     if (!file_status.status.ok()) {
       download_status = false;
+      std::cerr << "[Worker] Failed to download partition ..." << std::endl;
+      break;
     }
     reduce_phase_files.push_back(
         std::filesystem::path(worker_state_.reduce_phase_ip_dir) /
@@ -1239,6 +1262,8 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
 
   int retry = 0;
   if (!download_status) {
+
+    worker_state_.SetState(task, Phase::SHUFFLEFIX);
     while (true) {
       auto res = co_await shuffle_phase_loop(downloaded_files.value());
 
@@ -1258,6 +1283,13 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
   }
 
   // execute reduce task
+
+  /*
+    no need to set task, here as we update task
+    in shuffle fix loop
+  */
+  worker_state_.phase_ = Phase::REDUCE;
+
   std::optional<wc::CompleteRequest> reduce_res =
       co_await boost::asio::co_spawn(
           thread_pool_,
