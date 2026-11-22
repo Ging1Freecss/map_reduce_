@@ -132,7 +132,7 @@ template <IsEmitter Emitter = ReduceEmitContext,
 inline auto run_reduce_phase_with_external_sort(
     std::filesystem::path base_dir, std::size_t reduce_id, std::size_t num_maps,
     IsReducer<Iter, Emitter> auto &reducer,
-    std::vector<std::filesystem::path> &file_path,
+    const std::vector<std::filesystem::path> &file_path,
     std::size_t buffer_size = 64 * 1024) -> std::expected<void, StorageError> {
   assert(num_maps == file_path.size() &&
          "issue with number of file path given, not equal to map number");

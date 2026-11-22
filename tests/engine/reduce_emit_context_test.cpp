@@ -261,5 +261,147 @@ TEST_F(ReducePhaseTest, FullSequentialMapReducePipeline) {
   EXPECT_EQ(total_counts.size(), 6);
 }
 
+// 6. StreamingValueIterator Direct Iteration Test
+TEST_F(ReducePhaseTest, StreamingValueIteratorMultiFileMergeAndEarlyExit) {
+  // File 0: ("apple", "1"), ("banana", "1")
+  auto f0 = test_dir_ / "stream_0.data";
+  {
+    StagedRecordWriter writer(f0);
+    ASSERT_TRUE(writer.write_record("apple", "1").has_value());
+    ASSERT_TRUE(writer.write_record("banana", "1").has_value());
+    ASSERT_TRUE(writer.commit().has_value());
+  }
+
+  // File 1: ("apple", "2"), ("banana", "3"), ("banana", "4") (Unsorted)
+  auto f1 = test_dir_ / "stream_1.data";
+  {
+    StagedRecordWriter writer(f1);
+    ASSERT_TRUE(writer.write_record("banana", "4").has_value());
+    ASSERT_TRUE(writer.write_record("apple", "2").has_value());
+    ASSERT_TRUE(writer.write_record("banana", "3").has_value());
+    ASSERT_TRUE(writer.commit().has_value());
+  }
+
+  // File 2: Empty file
+  auto f2 = test_dir_ / "stream_2.data";
+  {
+    StagedRecordWriter writer(f2);
+    ASSERT_TRUE(writer.commit().has_value());
+  }
+
+  std::vector<std::filesystem::path> files = {f0, f1, f2};
+  StreamingValueIterator iter(files);
+
+  ASSERT_TRUE(iter.has_more_keys());
+  EXPECT_EQ(iter.current_key(), "apple");
+  EXPECT_TRUE(iter.has_next());
+  std::string v1{iter.next()};
+  EXPECT_TRUE(iter.has_next());
+  std::string v2{iter.next()};
+  EXPECT_FALSE(iter.has_next());
+
+  std::vector<std::string> apple_vals = {v1, v2};
+  std::sort(apple_vals.begin(), apple_vals.end());
+  EXPECT_EQ(apple_vals, (std::vector<std::string>{"1", "2"}));
+
+  // Advance to banana
+  EXPECT_EQ(iter.current_index(), 2);
+  ASSERT_TRUE(iter.has_more_keys());
+  EXPECT_EQ(iter.current_key(), "banana");
+
+  // Test early exit on banana: consume only 1 value, then call current_index()
+  EXPECT_TRUE(iter.has_next());
+  auto b_val = iter.next();
+  EXPECT_TRUE(b_val == "1" || b_val == "3" || b_val == "4");
+
+  // current_index() must drain the remaining banana values
+  EXPECT_EQ(iter.current_index(), 3);
+
+  // No more keys left
+  EXPECT_FALSE(iter.has_more_keys());
+  EXPECT_EQ(iter.current_key(), "");
+}
+
+// 7. End-to-End run_reduce_phase_with_external_sort Test
+TEST_F(ReducePhaseTest, RunReducePhaseWithExternalSortMultipleMappers) {
+  const std::size_t reduce_id = 1;
+  const std::size_t num_maps = 3;
+
+  // Mapper 0 partition: ("apple", "1"), ("date", "5"), ("banana", "2")
+  auto f0 = test_dir_ / "mr-0_1.data";
+  {
+    StagedRecordWriter writer(f0);
+    ASSERT_TRUE(writer.write_record("banana", "2").has_value());
+    ASSERT_TRUE(writer.write_record("apple", "1").has_value());
+    ASSERT_TRUE(writer.write_record("date", "5").has_value());
+    ASSERT_TRUE(writer.commit().has_value());
+  }
+
+  // Mapper 1 partition: ("banana", "1"), ("apple", "3")
+  auto f1 = test_dir_ / "mr-1_1.data";
+  {
+    StagedRecordWriter writer(f1);
+    ASSERT_TRUE(writer.write_record("apple", "3").has_value());
+    ASSERT_TRUE(writer.write_record("banana", "1").has_value());
+    ASSERT_TRUE(writer.commit().has_value());
+  }
+
+  // Mapper 2 partition: ("cherry", "4"), ("date", "1"), ("apple", "2")
+  auto f2 = test_dir_ / "mr-2_1.data";
+  {
+    StagedRecordWriter writer(f2);
+    ASSERT_TRUE(writer.write_record("cherry", "4").has_value());
+    ASSERT_TRUE(writer.write_record("apple", "2").has_value());
+    ASSERT_TRUE(writer.write_record("date", "1").has_value());
+    ASSERT_TRUE(writer.commit().has_value());
+  }
+
+  std::vector<std::filesystem::path> files = {f0, f1, f2};
+  WordCountReducer<StreamingValueIterator> reducer;
+
+  auto res = run_reduce_phase_with_external_sort(
+      test_dir_, reduce_id, num_maps, reducer, files);
+  ASSERT_TRUE(res.has_value());
+
+  // Verify mr-out-1 contents
+  auto out_path = test_dir_ / ("mr-out-" + std::to_string(reduce_id));
+  ASSERT_TRUE(std::filesystem::exists(out_path));
+
+  std::ifstream in(out_path, std::ios::binary);
+  ASSERT_TRUE(in.is_open());
+  RecordReader reader(in);
+
+  std::string k, v;
+
+  // Record 1: apple -> 1 + 3 + 2 = 6
+  auto r1 = reader.next_record(k, v);
+  ASSERT_TRUE(r1.has_value() && *r1);
+  EXPECT_EQ(k, "apple");
+  EXPECT_EQ(v, "6");
+
+  // Record 2: banana -> 2 + 1 = 3
+  auto r2 = reader.next_record(k, v);
+  ASSERT_TRUE(r2.has_value() && *r2);
+  EXPECT_EQ(k, "banana");
+  EXPECT_EQ(v, "3");
+
+  // Record 3: cherry -> 4
+  auto r3 = reader.next_record(k, v);
+  ASSERT_TRUE(r3.has_value() && *r3);
+  EXPECT_EQ(k, "cherry");
+  EXPECT_EQ(v, "4");
+
+  // Record 4: date -> 5 + 1 = 6
+  auto r4 = reader.next_record(k, v);
+  ASSERT_TRUE(r4.has_value() && *r4);
+  EXPECT_EQ(k, "date");
+  EXPECT_EQ(v, "6");
+
+  // Clean EOF
+  auto r5 = reader.next_record(k, v);
+  ASSERT_TRUE(r5.has_value());
+  EXPECT_FALSE(*r5);
+}
+
 } // namespace
 } // namespace mr

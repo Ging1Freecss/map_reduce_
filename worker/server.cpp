@@ -433,6 +433,218 @@ auto WorkerServer::fetch_map_data(wc::SplitDataRequest &request)
   co_return network_status;
 }
 
+auto WorkerServer::poll_report_shuffle_error(wc::ShuffleErrorReport &request)
+    -> boost::asio::awaitable<
+        std::expected<wc::ShuffleErrorReply, grpc::Status>> {
+  using RPC = agrpc::ClientRPC<
+      &wc::MapReduceService::Stub::PrepareAsyncReportShuffleError>;
+
+  grpc::ClientContext client_context;
+  client_context.set_deadline(std::chrono::system_clock::now() +
+                              std::chrono::seconds(2));
+
+  wc::ShuffleErrorReply response;
+
+  grpc::Status status =
+      co_await RPC::request(*control_grpc_context_, *wc_control_stub_,
+                            client_context, request, response);
+  if (status.ok()) {
+    co_return response;
+  }
+  co_return std::unexpected(status);
+}
+
+auto WorkerServer::poll_shuffle_error_fix(wc::ShuffleFixRequest &request)
+    -> boost::asio::awaitable<std::expected<wc::TaskAssignment, grpc::Status>> {
+  using RPC = agrpc::ClientRPC<
+      &wc::MapReduceService::Stub::PrepareAsyncShuffleErrorFix>;
+
+  grpc::ClientContext client_context;
+  client_context.set_deadline(std::chrono::system_clock::now() +
+                              std::chrono::seconds(2));
+
+  wc::TaskAssignment response;
+
+  grpc::Status status =
+      co_await RPC::request(*control_grpc_context_, *wc_control_stub_,
+                            client_context, request, response);
+  if (status.ok()) {
+    co_return response;
+  }
+  co_return std::unexpected(status);
+}
+
+auto WorkerServer::shuffle_phase_loop(
+    std::vector<MapPhaseOutputFilesStatus> &file_data)
+    -> boost::asio::awaitable<
+        std::optional<std::vector<std::filesystem::path>>> {
+  auto ex = co_await boost::asio::this_coro::executor;
+  auto cs = co_await boost::asio::this_coro::cancellation_state;
+
+  std::size_t num_file = file_data.size();
+  auto child_signals =
+      std::make_shared<std::vector<boost::asio::cancellation_signal>>(num_file);
+
+  if (cs.slot().is_connected()) {
+    cs.slot().assign([child_signals](boost::asio::cancellation_type type) {
+      for (auto &sig : *child_signals) {
+        sig.emit(type);
+      }
+    });
+  }
+
+  // clear parent slot on return
+  struct SlotCleaner {
+    boost::asio::cancellation_slot slot;
+    ~SlotCleaner() {
+      if (slot.is_connected()) {
+        slot.clear();
+      }
+    }
+  } cleaner{cs.slot()};
+
+  using ResultChannel = boost::asio::experimental::concurrent_channel<void(
+      boost::system::error_code, std::optional<wc::ShuffleErrorReply>)>;
+
+  auto channel = std::make_shared<ResultChannel>(ex, num_file);
+
+  for (std::size_t i = 0; i < num_file; i++) {
+    if (file_data[i].status.ok()) {
+      channel->try_send(boost::system::error_code{}, grpc::Status::OK);
+      continue;
+    }
+
+    boost::asio::co_spawn(
+        io_context_,
+        [self = shared_from_this(), channel, child_signals,
+         data = file_data[i].data,
+         status = file_data[i].status]() -> boost::asio::awaitable<void> {
+          wc::ShuffleErrorReport reply;
+
+          if (!self->worker_state_.task_assignment_ || !data.map_id ||
+              !data.reduce_id) {
+            throw std::runtime_error("data or task_assingment is not there");
+          }
+          int64_t generation_id =
+              self->worker_state_.task_assignment_->generation_id();
+          reply.set_generation_id(generation_id);
+          reply.set_reduce_task_id(data.reduce_id.value());
+          reply.set_failed_map_task_id(data.map_id.value());
+          reply.set_missing_path(data.filename);
+          reply.set_error_message("map task data is not there , error msg " +
+                                  status.error_message());
+
+          std::expected<wc::ShuffleErrorReply, grpc::Status> res =
+              co_await self->poll_report_shuffle_error(reply);
+
+          if (!res || !res.error().ok()) {
+            co_await channel->async_send(boost::system::error_code{},
+                                         std::nullopt);
+            co_return;
+          }
+          co_await channel->async_send(boost::system::error_code{},
+                                       res.value());
+        },
+        boost::asio::bind_cancellation_slot((*child_signals)[i].slot(),
+                                            boost::asio::detached));
+  }
+
+  bool ok = true;
+
+  for (std::size_t i = 0; i < num_file; i++) {
+    auto [ec, res] = co_await channel->async_receive(
+        boost::asio::as_tuple(boost::asio::use_awaitable));
+
+    if (ec) {
+      if (ec == boost::asio::error::operation_aborted ||
+          cs.cancelled() != boost::asio::cancellation_type::none) {
+        std::cerr << "[Worker] Partition ingestion cancelled.\n";
+      }
+      throw std::runtime_error("[Worker] Channel receive error: " +
+                               ec.message());
+    }
+
+    if (!res) {
+      co_return std::nullopt;
+    }
+  }
+
+  int numer_of_retries = 0;
+  while (true) {
+    wc::ShuffleFixRequest request;
+    /*
+      // worker asks for its specific assigned Reduce task with updated URIs
+message ShuffleFixRequest {
+  int64 reduce_task_id = 1;
+  string worker_id = 2;
+  int64 generation_id = 3;
+}
+    */
+    std::expected<wc::TaskAssignment, grpc::Status> res =
+        co_await poll_shuffle_error_fix(request);
+
+    if (!res) {
+
+      ++numer_of_retries;
+
+      if (numer_of_retries == 3) {
+        throw std::runtime_error("Connection with coodinator issue");
+      }
+
+      boost::asio::steady_timer timer{ex};
+      timer.expires_after(poll_task_wait_interval);
+      co_await timer.async_wait(boost::asio::use_awaitable);
+
+      continue;
+    }
+
+    wc::TaskAssignment &task = res.value();
+
+    if (task.type() == wc::TaskType::WAIT) {
+      boost::asio::steady_timer timer{ex};
+      timer.expires_after(poll_task_wait_interval);
+      co_await timer.async_wait(boost::asio::use_awaitable);
+      continue;
+    }
+
+    if (task.type() == wc::TaskType::MAP ||
+        (task.task_id() != worker_state_.task_assignment_->task_id())) {
+      throw std::runtime_error(
+          "In Shuffle Phase worker should only do current reduce task");
+    }
+
+    if (task.type() == wc::TaskType::SHUTDOWN) {
+      throw std::runtime_error("Coordinator ask to shut down");
+    }
+
+    // updated list of map uris
+    worker_state_.task_assignment_ = task;
+
+    std::optional<std::vector<MapPhaseOutputFilesStatus>> fetch_res =
+        co_await fetch_all_input_for_reduce();
+
+    if (!fetch_res) {
+      co_return std::nullopt;
+    }
+    std::vector<std::filesystem::path> reduce_phase_files;
+
+    for (const auto &file_status : fetch_res.value()) {
+      if (!file_status.status.ok()) {
+        co_return std::nullopt;
+      }
+      reduce_phase_files.push_back(
+          std::filesystem::path(worker_state_.reduce_phase_ip_dir) /
+          file_status.data.filename);
+      std::cout << "[Worker] Succeed to download partition "
+                << file_status.data.filename << " from "
+                << file_status.data.peer_endpoint << ": "
+                << file_status.status.error_message() << std::endl;
+    }
+
+    co_return reduce_phase_files;
+  }
+}
+
 auto WorkerServer::fetch_input_data_for_reduce(
     const std::string &peer_endpoint, const std::string &partition_filename)
     -> boost::asio::awaitable<grpc::Status> {
@@ -1011,16 +1223,10 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
   }
 
   std::vector<std::filesystem::path> reduce_phase_files;
-
+  bool download_status = true;
   for (const auto &file_status : downloaded_files.value()) {
     if (!file_status.status.ok()) {
-      std::cerr << "[Worker] Failed to download partition "
-                << file_status.data.filename << " from "
-                << file_status.data.peer_endpoint << ": "
-                << file_status.status.error_message() << std::endl;
-      // Fault handling: report shuffle error to coordinator or throw
-      throw std::runtime_error("Failed to fetch partition: " +
-                               file_status.data.filename);
+      download_status = false;
     }
     reduce_phase_files.push_back(
         std::filesystem::path(worker_state_.reduce_phase_ip_dir) /
@@ -1029,6 +1235,26 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
               << file_status.data.filename << " from "
               << file_status.data.peer_endpoint << ": "
               << file_status.status.error_message() << std::endl;
+  }
+
+  int retry = 0;
+  if (!download_status) {
+    while (true) {
+      auto res = co_await shuffle_phase_loop(downloaded_files.value());
+
+      if (!res) {
+        retry++;
+
+        if (retry == 3) {
+          throw std::runtime_error(
+              "issue with getting files for reduce phase after 3 tries");
+        }
+        continue;
+      } else {
+        reduce_phase_files = std::move(res.value());
+        break;
+      }
+    }
   }
 
   // execute reduce task

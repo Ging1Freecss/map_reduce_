@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -91,7 +92,8 @@ public:
                                  " in StreamingValueIterator");
       }
 
-      auto file = std::make_unique<std::ifstream>(file_paths[i]);
+      auto file =
+          std::make_unique<std::ifstream>(file_paths[i], std::ios::binary);
 
       if (!file->is_open()) {
         throw std::runtime_error("Can't open file" +
@@ -136,7 +138,7 @@ public:
       -> std::expected<void, StorageError> {
     std::vector<std::pair<std::string, std::string>> buffer;
     {
-      std::ifstream in(path);
+      std::ifstream in(path, std::ios::binary);
 
       if (!in.is_open())
         throw std::runtime_error("Can't open file" +

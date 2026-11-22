@@ -83,6 +83,10 @@ rpc FetchInputSplit(SplitDataRequest) returns (stream SplitDataChunk);
 rpc ShuffleErrorFix(ShuffleFixRequest) returns (TaskAssignment);
   */
 
+  auto handle_shuffle_error_fix(ShuffleErrorFixRPC &rpc,
+                                wc::ShuffleFixRequest &request)
+      -> boost::asio::awaitable<void>;
+
   void register_handlers();
   void run();
   void stop();

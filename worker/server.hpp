@@ -42,6 +42,20 @@ public:
   auto poll_complete_task(wc::CompleteRequest &request)
       -> boost::asio::awaitable<std::expected<wc::CompleteReply, grpc::Status>>;
 
+  // fix shuffle error phase
+  auto poll_report_shuffle_error(wc::ShuffleErrorReport &request)
+      -> boost::asio::awaitable<
+          std::expected<wc::ShuffleErrorReply, grpc::Status>>;
+
+  auto poll_shuffle_error_fix(wc::ShuffleFixRequest &request)
+      -> boost::asio::awaitable<
+          std::expected<wc::TaskAssignment, grpc::Status>>;
+
+  auto shuffle_phase_loop(std::vector<MapPhaseOutputFilesStatus> &file_data)
+      -> boost::asio::awaitable<
+          std::optional<std::vector<std::filesystem::path>>>;
+  // --- end ---
+
   using FetchPartitionRPC = agrpc::ServerRPC<
       &ww::WorkerShuffleService::AsyncService::RequestFetchPartition>;
   auto handle_fetch_partition(FetchPartitionRPC &rpc,

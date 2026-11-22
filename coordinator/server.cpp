@@ -19,6 +19,7 @@
 #include <fstream>
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/server_builder.h>
+#include <grpcpp/support/status.h>
 #include <ios>
 #include <memory>
 
@@ -135,6 +136,15 @@ void CoordinateServer::register_handlers() {
         co_return;
       },
       helper::RethrowFirstArg{});
+
+  agrpc::register_awaitable_rpc_handler<ShuffleErrorFixRPC>(
+      *control_grpc_context_, wc_service_,
+      [self = shared_from_this()](
+          ShuffleErrorFixRPC &rpc,
+          wc::ShuffleFixRequest &request) -> boost::asio::awaitable<void> {
+        co_return co_await self->handle_shuffle_error_fix(rpc, request);
+      },
+      helper::RethrowFirstArg{});
 }
 
 auto CoordinateServer::handle_poll_task(PollTaskRPC &rpc,
@@ -146,6 +156,24 @@ auto CoordinateServer::handle_poll_task(PollTaskRPC &rpc,
             << " -> assigned task_id=" << response.task_id()
             << " type=" << static_cast<int>(response.type()) << std::endl;
   co_await rpc.finish(response, grpc::Status::OK);
+}
+
+auto CoordinateServer::handle_shuffle_error_fix(ShuffleErrorFixRPC &rpc,
+                                                wc::ShuffleFixRequest &request)
+    -> boost::asio::awaitable<void> {
+  wc::TaskAssignment task =
+      std::move(coordinate_state_->GetUpdatedReduceTaskForWorker(request));
+
+  if (task.type() == wc::TaskType::WAIT) {
+
+    std::cout << "[Coordinator] Shuffle Error from " << request.worker_id()
+              << "Generation ID: " << request.generation_id() << " To WAIT";
+  }
+
+  std::cout << "[Coordinator] Shuffle Error from " << request.worker_id()
+            << "Generation ID: " << request.generation_id()
+            << " To AssignTask: " << task.task_id();
+  co_await rpc.finish(task, grpc::Status::OK);
 }
 
 auto CoordinateServer::handle_heart_beat(HeartBeatRPC &rpc,
