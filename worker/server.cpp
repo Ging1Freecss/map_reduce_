@@ -486,10 +486,12 @@ auto WorkerServer::shuffle_phase_loop(
       std::make_shared<std::vector<boost::asio::cancellation_signal>>(num_file);
 
   if (cs.slot().is_connected()) {
-    cs.slot().assign([child_signals](boost::asio::cancellation_type type) {
-      for (auto &sig : *child_signals) {
-        sig.emit(type);
-      }
+    cs.slot().assign([child_signals, ex](boost::asio::cancellation_type type) {
+      boost::asio::dispatch(ex, [child_signals, type]() {
+        for (auto &sig : *child_signals) {
+          sig.emit(type);
+        }
+      });
     });
   }
 
@@ -532,12 +534,17 @@ auto WorkerServer::shuffle_phase_loop(
           reply.set_generation_id(generation_id);
           reply.set_reduce_task_id(data.reduce_id.value());
           reply.set_failed_map_task_id(data.map_id.value());
-          reply.set_missing_path(data.filename);
+          std::string full_uri =
+              data.peer_endpoint.empty()
+                  ? data.filename
+                  : (data.peer_endpoint + "/" + data.filename);
+          reply.set_missing_path(full_uri);
           reply.set_error_message("map task data is not there , error msg " +
                                   status.error_message());
 
-          std::cout << "[Worker] 🚨 Escalating shuffle failure: reporting missing map_task "
-                    << data.map_id.value() << " (" << data.filename
+          std::cout << "[Worker] 🚨 Escalating shuffle failure: reporting "
+                       "missing map_task "
+                    << data.map_id.value() << " (" << full_uri
                     << ") to Coordinator..." << std::endl;
 
           std::expected<wc::ShuffleErrorReply, grpc::Status> res =
@@ -550,7 +557,8 @@ auto WorkerServer::shuffle_phase_loop(
                                          std::nullopt);
             co_return;
           }
-          std::cout << "[Worker] 📩 Coordinator acknowledged shuffle error for map_task "
+          std::cout << "[Worker] 📩 Coordinator acknowledged shuffle error for "
+                       "map_task "
                     << data.map_id.value()
                     << ". Reducer entering SHUFFLEFIX wait loop..."
                     << std::endl;
@@ -923,15 +931,20 @@ auto WorkerServer::fetch_all_input_for_reduce() -> boost::asio::awaitable<
   auto ex = co_await boost::asio::this_coro::executor;
   auto cs = co_await boost::asio::this_coro::cancellation_state;
 
+  auto bg_strand = boost::asio::make_strand(bg_io_context_);
+
   auto child_signals =
       std::make_shared<std::vector<boost::asio::cancellation_signal>>(num_uris);
 
   if (cs.slot().is_connected()) {
-    cs.slot().assign([child_signals](boost::asio::cancellation_type type) {
-      for (auto &sig : *child_signals) {
-        sig.emit(type);
-      }
-    });
+    cs.slot().assign(
+        [child_signals, bg_strand](boost::asio::cancellation_type type) {
+          boost::asio::dispatch(bg_strand, [child_signals, type]() {
+            for (auto &sig : *child_signals) {
+              sig.emit(type);
+            }
+          });
+        });
   }
 
   // clear parent slot on return
@@ -1006,7 +1019,7 @@ auto WorkerServer::fetch_all_input_for_reduce() -> boost::asio::awaitable<
     }
 
     boost::asio::co_spawn(
-        bg_io_context_,
+        bg_strand,
         [self = shared_from_this(), channel, parsed,
          child_signals]() -> boost::asio::awaitable<void> {
           grpc::Status status = co_await self->fetch_input_data_for_reduce(
@@ -1247,9 +1260,7 @@ auto WorkerServer::process_reduce_task(wc::TaskAssignment task)
   worker_state_.SetState(task, Phase::REDUCE);
 
   std::optional<std::vector<MapPhaseOutputFilesStatus>> downloaded_files =
-      co_await boost::asio::co_spawn(bg_io_context_,
-                                     fetch_all_input_for_reduce(),
-                                     boost::asio::use_awaitable);
+      co_await fetch_all_input_for_reduce();
 
   if (!downloaded_files) {
     throw std::runtime_error("issue when downloading map phase output");
@@ -1625,14 +1636,16 @@ void WorkerServer::run() {
 
   boost::asio::co_spawn(
       io_context_,
-      [&]() -> boost::asio::awaitable<void> {
-        co_await run_worker_with_heartbeats();
+      [self = shared_from_this()]() -> boost::asio::awaitable<void> {
+        co_await self->run_worker_with_heartbeats();
       },
       boost::asio::detached);
 
   boost::asio::co_spawn(
       io_context_,
-      [&]() -> boost::asio::awaitable<void> { co_await start_heart_beats(); },
+      [self = shared_from_this()]() -> boost::asio::awaitable<void> {
+        co_await self->start_heart_beats();
+      },
       boost::asio::detached);
 
   background_thread_ = std::jthread([self = shared_from_this()]() {

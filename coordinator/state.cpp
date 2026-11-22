@@ -354,10 +354,27 @@ auto CoordinatorState::ReducePhaseShuffleError(wc::ShuffleErrorReport &request)
     return reply;
   }
 
-  job_conf.phase = Phase::SHUFFLEFIX;
-
-  // Invalidate only the failed Map task
+  // Stale Error Report Check:
+  // If the Map task is already COMPLETED, verify whether the reported failed URI
+  // matches the CURRENT intermediate partition URI.
+  // If a previous report already triggered recomputation and a spare worker has already
+  // completed the Map task, any delayed report for the old dead worker's URI is stale.
   if (map_tasks[map_id].task_rec.state == State::COMPLETED) {
+    std::size_t r_id = static_cast<std::size_t>(reduce_id);
+    if (r_id < map_tasks[map_id].intermediate_op_file.size()) {
+      const auto &current_uri = map_tasks[map_id].intermediate_op_file[r_id];
+      if (!request.missing_path().empty() && request.missing_path() != current_uri) {
+        std::cout << "[Coordinator] ⚠️ Stale ShuffleErrorReport ignored: Map "
+                  << map_id << " partition " << reduce_id
+                  << " already recomputed at " << current_uri
+                  << " (reported stale URI: " << request.missing_path() << ")"
+                  << std::endl;
+        reply.set_acknowledged(true);
+        return reply;
+      }
+    }
+
+    // Invalidate only if this is a genuine failure against the current active URI
     map_tasks[map_id].task_rec.state = State::IDLE;
     map_tasks[map_id].worker_id.clear();
     map_tasks[map_id].intermediate_op_file.clear();
@@ -367,6 +384,11 @@ auto CoordinatorState::ReducePhaseShuffleError(wc::ShuffleErrorReport &request)
     if (map_tasks_completed > 0) {
       map_tasks_completed--;
     }
+  }
+
+  // Only transition to SHUFFLEFIX if Map tasks are incomplete
+  if (!CheckIfMapPhaseCompleted()) {
+    job_conf.phase = Phase::SHUFFLEFIX;
   }
 
   reply.set_acknowledged(true);

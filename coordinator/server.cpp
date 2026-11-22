@@ -200,8 +200,7 @@ auto CoordinateServer::handle_report_shuffle_error(
   std::cout << "[Coordinator] 🚨 ShuffleErrorReport received: Reducer "
             << request.reduce_task_id() << " cannot reach partition "
             << request.missing_path() << " (Map Task "
-            << request.failed_map_task_id()
-            << ") -> Resetting map task to IDLE, entering SHUFFLEFIX!"
+            << request.failed_map_task_id() << ")"
             << std::endl;
   wc::ShuffleErrorReply response =
       coordinate_state_->ReducePhaseShuffleError(request);
