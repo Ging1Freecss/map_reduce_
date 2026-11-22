@@ -1,12 +1,12 @@
-# Distributed MapReduce Framework (C++20)
+# Distributed MapReduce Framework (C++23)
 
-[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-blue.svg)](https://en.cppreference.com/w/cpp/23)
 [![Boost.Asio](https://img.shields.io/badge/Boost.Asio-Coroutines-orange.svg)](https://www.boost.org/doc/libs/release/doc/html/boost_asio.html)
 [![asio-grpc](https://img.shields.io/badge/asio--grpc-agrpc-green.svg)](https://github.com/Tradias/asio-grpc)
 [![gRPC & Protobuf](https://img.shields.io/badge/gRPC-Protobuf-red.svg)](https://grpc.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A asynchronous distributed MapReduce  implemented in **C++23**.  it uses  **Boost.Asio C++20 coroutines**, **asio-grpc (`agrpc`)**, atomic storage staging, and a fault recovery protocol (**`SHUFFLEFIX`**) with lease fencing.
+An asynchronous distributed MapReduce runtime implemented in **C++23**. It uses **Boost.Asio C++20 coroutines**, **asio-grpc (`agrpc`)**, atomic storage staging, and a fault recovery protocol (**`SHUFFLEFIX`**) with lease fencing.
 
 ---
 
@@ -14,6 +14,9 @@ A asynchronous distributed MapReduce  implemented in **C++23**.  it uses  **Boos
 
 - [Architectural Overview](#architectural-overview)
 - [System Architecture](#system-architecture)
+- [Data Sharing & Transfer Pipelines](#data-sharing--transfer-pipelines)
+  - [1. Map Phase: Coordinator ➔ Worker Input Streaming](#1-map-phase-coordinator--worker-input-streaming)
+  - [2. Reduce Phase: Worker ➔ Worker P2P Shuffle & Local Hard-Linking](#2-reduce-phase-worker--worker-p2p-shuffle--local-hard-linking)
 - [Core Components](#core-components)
   - [Coordinator Subsystem](#1-coordinator-subsystem)
   - [Worker Subsystem](#2-worker-subsystem)
@@ -67,6 +70,81 @@ flowchart TD
 
 ---
 
+## Data Sharing & Transfer Pipelines
+
+The framework coordinates data sharing across two distinct phases without intermediate disk persistence on the Coordinator node:
+
+### 1. Map Phase: Coordinator ➔ Worker (Input Split Streaming)
+
+In the Map phase, the raw input file resides on the Coordinator host. Instead of transferring the entire dataset or requiring a shared network drive (NFS/HDFS), the Coordinator acts as a streaming split server (`FetchInputSplit` RPC):
+
+```mermaid
+flowchart LR
+    subgraph Master ["Coordinator Node"]
+        Disk["Input File on Disk"] -->|Seek offset, Read 64KB| Producer["Disk Strand Producer<br/>(thread_pool_)"]
+        Producer -->|async_send| Channel["concurrent_channel<br/>(4MB buffer)"]
+        Channel -->|async_receive| Streamer["gRPC Server Streamer<br/>(data_grpc_context_)"]
+    end
+
+    Streamer -->|gRPC Stream: FetchInputSplit| WorkerNet["gRPC Client Reader<br/>(agrpc::ClientRPC)"]
+
+    subgraph MapWorker ["Map Worker Node"]
+        WorkerNet -->|async_send| WChannel["concurrent_channel<br/>(4MB buffer)"]
+        WChannel -->|async_receive| DiskWriter["Disk Strand Writer<br/>(thread_pool_)"]
+        DiskWriter --> LocalSplit["Local Staged File:<br/>*.map_data.{task_id}"]
+        LocalSplit --> Mapper["WordCountMapper Execution<br/>(Hash Partitioning)"]
+        Mapper --> InterFiles["Intermediate Shards:<br/>mr-{map}_{reduce}.data"]
+    end
+```
+
+- **Line-Aligned Splitting**: The Coordinator's `generate_text_splits()` scans the raw input file and calculates split boundaries aligned strictly to newline (`\n`) characters (~64 MB target), ensuring no individual words or records are truncated across split boundaries.
+- **Lease-Fenced Verification**: When a worker requests a split via `FetchInputSplit(SplitDataRequest)`, the coordinator validates `generation_id` and lease tokens on `io_context_` (via `co_spawn`) before reading disk data.
+- **Asynchronous Decoupled I/O**: Both Coordinator (sender) and Worker (receiver) use Boost.Asio's `concurrent_channel` (64 chunks × 64 KB = 4 MB buffer) to decouple blocking disk reads/writes on a `thread_pool_` strand from the asynchronous gRPC network loop.
+- **Local Staging & Cleanup**: The worker streams chunks directly into `<input_file>.map_data.<task_id>`, executes the user `WordCountMapper`, atomically stages and commits the hashed partitions (`mr-<map>_<reduce>.data`), and immediately deletes the temporary input split file.
+
+---
+
+### 2. Reduce Phase: Worker ➔ Worker (P2P Shuffle & Collocated Zero-Copy)
+
+In the Reduce phase, workers do **not** route data through the Coordinator. Instead, intermediate partition files are fetched directly peer-to-peer between workers via `WorkerShuffleService`:
+
+```mermaid
+flowchart LR
+    subgraph Manifest ["1. Manifest Retrieval"]
+        Coord["Coordinator"] -->|TaskAssignment with<br/>intermediate_paths| Reducer["Reducer Worker"]
+    end
+
+    subgraph Routing ["2. Route Decision"]
+        Reducer --> Check{"Shard Collocated<br/>on Same Host?"}
+    end
+
+    subgraph Collocated ["3. Local Zero-Network Path"]
+        Check -->|Yes: peer_endpoint == self| HardLink["Atomic Hard-Link<br/>map_dir ➔ reduce_dir"]
+        HardLink --> LocalInput["Local Reduce Input File"]
+    end
+
+    subgraph RemoteP2P ["4. Remote P2P Streaming Path"]
+        Check -->|No: Remote Worker| P2P["FetchPartition RPC<br/>(10s Fail-Fast Deadline)"]
+        P2P --> PeerService["Remote WorkerShuffleService<br/>(Stream mr-{M}_{R}.data)"]
+        PeerService --> StreamBack["Stream 64KB Chunks<br/>over Network"]
+        StreamBack --> LocalInput
+    end
+
+    subgraph Execution ["5. Merge & Reduction"]
+        LocalInput --> InPlaceSort["StreamingValueIterator<br/>In-Place File Sort"]
+        InPlaceSort --> HeapMerge["K-Way Min-Heap Merge<br/>Monotonic Key Stream"]
+        HeapMerge --> ReducerExec["WordCountReducer<br/>Commit mr-out-{R}"]
+    end
+```
+
+- **Manifest Distribution**: The Coordinator assembles the exact intermediate URIs (`<ip>:<port>/mr-<map>_<reduce>.data`) matching the Reducer's assigned partition ID ($R$) and passes them in `TaskAssignment::intermediate_paths`.
+- **Zero-Network Hard-Linking Optimization**: If an intermediate shard was produced by the reducer worker itself (`parsed.peer_endpoint == advertised_host_`), the worker bypasses gRPC serialization and loopback network entirely by hard-linking the file from `map_phase_op_dir` to `reduce_phase_ip_dir`.
+- **Incremental Resumption**: Before initiating network requests, the Reducer checks if shards already exist on disk (from previous runs or partial recoveries), skipping redundant downloads.
+- **Fail-Fast P2P RPCs**: Remote downloads connect to `ww::WorkerShuffleService` hosted by peer map workers with an explicit 10-second deadline to detect dead peers immediately and initiate the `SHUFFLEFIX` recovery loop.
+- **Memory-Bounded External Merge**: `StreamingValueIterator` sorts each partition file on disk and merges them via a $K$-way min-heap, guaranteeing monotonically ordered keys are streamed to `WordCountReducer` without buffering all dataset values in RAM.
+
+---
+
 ## Core Components
 
 ### 1. Coordinator Subsystem
@@ -105,44 +183,15 @@ When an intermediate Map worker crashes during the shuffle phase, the cluster re
 ### Fault Recovery State & Control Graph
 
 ```mermaid
-flowchart TD
-    subgraph Phase1 ["1. Normal Execution"]
-        MPhase["Phase: MAP"] -->|All Map Tasks Complete| RPhase["Phase: REDUCE"]
-        RPhase --> ReducerDownload["Reducer Downloads Shards<br/>(P2P FetchPartition)"]
-    end
-
-    subgraph Phase2 ["2. Failure Detection & Escalation"]
-        ReducerDownload -->|Peer Worker Crashes / Drops| ErrorDetect["Reducer Catches Connection Failure<br/>(Fail-fast 10s Deadline)"]
-        ErrorDetect --> Escalation["Reducer Calls ReportShuffleError<br/>(Reports Failed Map ID & Missing URI)"]
-    end
-
-    subgraph Phase3 ["3. Coordinator State Machine Invalidation"]
-        Escalation --> MasterState["Coordinator Transitions to SHUFFLEFIX"]
-        MasterState --> Invalidate["• Failed Map: COMPLETED ➔ IDLE<br/>• Generation ID Incremented (Lease Fencing)<br/>• Stale URIs Purged from Manifest"]
-        Invalidate --> ReducerHold["Reducer Retains Already Downloaded Shards<br/>Enters ShuffleErrorFix Wait Loop (500ms)"]
-    end
-
-    subgraph Phase4 ["4. Recomputation by Spare Worker"]
-        Invalidate --> SparePoll["Idle / Spare Worker Calls PollTask()"]
-        SparePoll --> AssignMap["Coordinator Dispatches Map Task"]
-        AssignMap --> Recompute["Worker Recomputes Split & Writes Shards"]
-        Recompute --> CompleteRecompute["Worker Calls CompleteTask()<br/>Advertises Fresh Host:Port Shard URIs"]
-    end
-
-    subgraph Phase5 ["5. Targeted Re-Attachment & Completion"]
-        CompleteRecompute --> MapDone{"All Map Tasks<br/>Completed?"}
-        MapDone -->|No| ReducerWait["ShuffleErrorFix Returns WAIT"]
-        ReducerWait --> ReducerHold
-        MapDone -->|Yes| PhaseRestore["Phase Transitions Back to REDUCE"]
-        PhaseRestore --> ReducerAttach["ShuffleErrorFix Returns Updated Manifest<br/>(Fresh Peer Endpoints)"]
-        ReducerHold --> ReducerAttach
-        ReducerAttach --> FetchNew["Reducer Fetches ONLY Missing Partition<br/>from Recomputed Worker"]
-        FetchNew --> ReducerWork["Streaming External Sort & WordCountReducer"]
-        ReducerWork --> CommitReduce["Commit Final Output (mr-out-R)"]
-    end
+flowchart LR
+    A["1. P2P Fetch Fails<br/>(10s timeout / peer crash)"] -->|ReportShuffleError| B["2. Coordinator: SHUFFLEFIX<br/>(Map ➔ IDLE, Gen Bumped)"]
+    B -->|PollTask| C["3. Spare Worker<br/>Recomputes Map Task"]
+    C -->|CompleteTask| D["4. Phase ➔ REDUCE<br/>(Manifest Updated)"]
+    D -->|ShuffleErrorFix| E["5. Reducer Fetches New Shard<br/>& Commits Final Output"]
 ```
 
-### P2P Protocol Sequence
+<details>
+<summary><b>View Detailed P2P Protocol Sequence Diagram</b></summary>
 
 ```mermaid
 sequenceDiagram
@@ -152,33 +201,27 @@ sequenceDiagram
     participant Peer as Map Worker (W2)
     participant Spare as Spare Worker (W3)
 
-    Reducer->>Peer: FetchPartition("mr-1_0.data")
-    Note over Peer: 💥 Peer Crashes / Network Fails
-    Peer--xReducer: Connection Refused / Timeout (10s)
+    Reducer->>Peer: FetchPartition("mr-1_0.data") (💥 Peer Crashes)
+    Reducer->>Master: ReportShuffleError(failed_map_id=1)
+    Note over Master: REDUCE ➔ SHUFFLEFIX<br/>Map 1: COMPLETED ➔ IDLE
+    Master-->>Reducer: ShuffleErrorReply(acknowledged)
     
-    Reducer->>Master: ReportShuffleError(failed_map_id=1, missing_path)
-    Note over Master: State Transition: REDUCE -> SHUFFLEFIX<br/>Map Task 1: COMPLETED -> IDLE<br/>Bump Generation ID
-    Master-->>Reducer: ShuffleErrorReply(acknowledged=true)
-    
-    loop Reducer Pause Loop (every 500ms)
+    loop Waiting for Recomputation (every 500ms)
         Reducer->>Master: ShuffleErrorFix(reduce_id=0, gen_id)
         Master-->>Reducer: TaskAssignment(WAIT)
     end
     
-    Spare->>Master: PollTask()
-    Master-->>Spare: TaskAssignment(MAP, task_id=1, gen=new)
-    Spare->>Master: FetchInputSplit(task_id=1)
-    Spare->>Spare: Recomputes Map Task 1
-    Spare->>Master: CompleteTask(task_id=1, output_paths=[...])
-    Note over Master: Map Task 1 COMPLETED<br/>Phase returns to REDUCE
+    Spare->>Master: PollTask() ➔ Recomputes Map 1
+    Spare->>Master: CompleteTask(task_id=1, new_uris=[...])
+    Note over Master: Map 1 Done ➔ Phase returns to REDUCE
 
     Reducer->>Master: ShuffleErrorFix(reduce_id=0, gen_id)
-    Master-->>Reducer: TaskAssignment(REDUCE, updated_uris)
-    
-    Reducer->>Spare: FetchPartition("mr-1_0.data")
-    Spare-->>Reducer: Streams recomputed shard
-    Note over Reducer: Executes Reduce task<br/>Commits mr-out-0
+    Master-->>Reducer: TaskAssignment(REDUCE, updated_manifest)
+    Reducer->>Spare: FetchPartition("mr-1_0.data") ➔ Streams Shard
+    Note over Reducer: Aggregates & Commits mr-out-0
 ```
+
+</details>
 
 ---
 
