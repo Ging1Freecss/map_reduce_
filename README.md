@@ -260,7 +260,10 @@ sequenceDiagram
 ├── scripts/                      # Automated cluster testing and verification
 │   ├── test_fault_recovery_visual.py # Live step-by-step failure demonstration
 │   ├── test_shuffle_stress.py    # Multi-worker shuffle recovery stress test
-│   └── run_cluster.sh            # Local cluster launch script
+│   ├── test_shuffle_recovery.py  # Mid-job worker crash recovery test
+│   ├── run_cluster.sh            # Local cluster launch script
+│   ├── show_output.sh            # Cluster execution summary script
+│   └── inspect_mr.py             # Binary partition inspector & validator
 └── tests/                        # Comprehensive unit test suite (94 tests)
 ```
 

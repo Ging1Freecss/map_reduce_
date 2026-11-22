@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
 # Configuration with defaults (can be overridden via CLI arguments or env vars)
 INPUT_FILE="${1:-data/sample.txt}"
 NUM_REDUCERS="${2:-4}"

@@ -62,6 +62,10 @@ def inspect_intermediate(intermediate_dir):
     print_banner(f"2. Intermediate Map Output Files ({intermediate_dir})")
     files = sorted(glob.glob(os.path.join(intermediate_dir, "mr-*_*.data")))
     if not files:
+        files = sorted(glob.glob(os.path.join(intermediate_dir, "*", "intermediate", "mr-*_*.data")))
+    if not files:
+        files = sorted(glob.glob(os.path.join(intermediate_dir, "**", "mr-*_*.data"), recursive=True))
+    if not files:
         print(f"  No intermediate files found in {intermediate_dir}")
         return
 
@@ -116,7 +120,7 @@ def inspect_intermediate(intermediate_dir):
 
 if __name__ == "__main__":
     input_file = sys.argv[1] if len(sys.argv) > 1 else "data/sample.txt"
-    intermediate_dir = sys.argv[2] if len(sys.argv) > 2 else "/tmp/mr_worker_intermediate"
+    intermediate_dir = sys.argv[2] if len(sys.argv) > 2 else "/var/tmp/mr_worker"
     inspect_input(input_file)
     inspect_intermediate(intermediate_dir)
 
