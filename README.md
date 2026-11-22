@@ -98,7 +98,7 @@ flowchart TD
         --> InterFiles["🗂️ Intermediate Shards<br/>(mr-{M}_{R}.data)"]
     end
 
-    CoordinatorNode ==>|gRPC Network Stream (64KB chunks)| WorkerNode
+    CoordinatorNode ==>|gRPC Network Stream - 64KB Chunks| WorkerNode
 ```
 
 - **Line-Aligned Splitting**: The Coordinator's `generate_text_splits()` scans the raw input file and calculates split boundaries aligned strictly to newline (`\n`) characters (~64 MB target), ensuring no individual words or records are truncated across split boundaries.
@@ -114,7 +114,7 @@ In the Reduce phase, workers do **not** route data through the Coordinator. Inst
 
 ```mermaid
 flowchart TD
-    subgraph Acquisition ["1. Shard Acquisition (Collocated Zero-Copy vs Remote P2P Shuffle)"]
+    subgraph Acquisition ["1. Shard Acquisition - Collocated Zero-Copy vs Remote P2P Shuffle"]
         direction LR
         Manifest["📋 TaskAssignment Manifest<br/>(Intermediate URIs)"]
         --> Reducer["🧑‍💻 Reducer Worker"]
