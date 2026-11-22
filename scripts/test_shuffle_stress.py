@@ -3,6 +3,8 @@ import subprocess
 import time
 import os
 import sys
+import glob
+import shutil
 
 def main():
     print("=" * 65)
@@ -22,15 +24,12 @@ def main():
     # 1. Clean workspaces
     print("[1/5] Cleaning intermediate directories...")
     for d in [
-        "/var/tmp/mr_worker_intermediate",
-        "/var/tmp/mr_worker_reduce_input",
-        "/var/tmp/mr_worker_reduce_output",
+        "/var/tmp/mr_worker",
         "/tmp/mr_stress_test"
     ]:
+        if os.path.exists(d):
+            shutil.rmtree(d, ignore_errors=True)
         os.makedirs(d, exist_ok=True)
-        for f in os.listdir(d):
-            try: os.remove(os.path.join(d, f))
-            except OSError: pass
 
     # 2. Generate ~40,000 lines of data (creates ~8 Map tasks with 40KB splits)
     input_file = "/tmp/mr_stress_test/stress_input.txt"
@@ -48,8 +47,9 @@ def main():
         ["./build/tests/sequential_harness", input_file, "-r", "2", "-w", golden_dir],
         check=True, stdout=subprocess.DEVNULL
     )
+    golden_files = sorted(glob.glob(f"{golden_dir}/mr-out-*"), key=lambda p: os.path.basename(p))
     golden_sorted = "/tmp/mr_stress_test/golden_sorted.txt"
-    os.system(f"cat {golden_dir}/mr-out-* | sort > {golden_sorted}")
+    os.system(f"cat {' '.join(golden_files)} > {golden_sorted}")
 
     # 4. Start Coordinator and 4 Workers (W=4 > R=2)
     print("[4/5] Launching Coordinator and 4 Workers (:50052, :50053, :50054, :50055)...")
@@ -79,15 +79,19 @@ def main():
     fault_injected = False
     for _ in range(200):
         time.sleep(0.05)
-        # Check if Worker 2 finished at least one map task
-        shards = [f for f in os.listdir("/var/tmp/mr_worker_intermediate") if f.endswith(".data")]
+        # Check if Worker 2 (:50053) produced intermediate shards
+        shards = glob.glob(f"/var/tmp/mr_worker/*50053*/intermediate/*.data")
+        if not shards:
+            shards = glob.glob(f"/var/tmp/mr_worker/*{w2.pid}*/intermediate/*.data")
+        if not shards:
+            shards = glob.glob("/var/tmp/mr_worker/*/intermediate/*.data")
         if shards:
-            print(f"       -> 💥 Terminating Worker 2 (:50053) mid-job! Detected shards: {shards[:3]}")
+            print(f"       -> 💥 Terminating Worker 2 (:50053) mid-job! Detected shards: {[os.path.basename(x) for x in shards[:3]]}")
             w2.kill()
             w2.wait()
             # Delete Worker 2's produced shards so reducers are forced to trigger SHUFFLEFIX
             for f in shards:
-                try: os.remove(f"/var/tmp/mr_worker_intermediate/{f}")
+                try: os.remove(f)
                 except: pass
             fault_injected = True
             break
@@ -108,8 +112,9 @@ def main():
     coord_log.close(); w1_log.close(); w2_log.close(); w3_log.close(); w4_log.close()
 
     # 6. Verify Correctness & Assertions
+    cluster_files = sorted(glob.glob("/var/tmp/mr_worker/*/reduce_output/mr-out-*"), key=lambda p: os.path.basename(p))
     cluster_sorted = "/tmp/mr_stress_test/cluster_sorted.txt"
-    os.system(f"cat /var/tmp/mr_worker_reduce_output/mr-out-* | sort > {cluster_sorted}")
+    os.system(f"cat {' '.join(cluster_files)} > {cluster_sorted}")
 
     diff_res = subprocess.run(["diff", "-u", golden_sorted, cluster_sorted], capture_output=True, text=True)
 

@@ -3,8 +3,10 @@
 #include "mr_coordination.pb.h"
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <grpcpp/support/status.h>
 #include <optional>
+#include <string>
 namespace mr {
 
 enum class Phase { IDLE, MAP, REDUCE, SHUFFLEFIX, DONE };
@@ -24,6 +26,10 @@ struct MapPhaseOutputFilesStatus {
 
 class WorkerState {
 public:
+  WorkerState();
+
+  void InitDirectories(const std::string &base_dir = "/var/tmp/mr_worker");
+
   auto ExecuteMapTask() -> std::optional<wc::CompleteRequest>;
 
   auto GetMapTaskInputFileName(const std::string &input_file,
@@ -47,9 +53,9 @@ public:
   std::string advertised_host_;
   std::optional<wc::TaskAssignment> task_assignment_{std::nullopt};
 
-  const std::string map_phase_op_dir{"/var/tmp/mr_worker_intermediate"};
-  const std::string reduce_phase_ip_dir{"/var/tmp/mr_worker_reduce_input"};
-  const std::string reduce_phase_out_dir{"/var/tmp/mr_worker_reduce_output"};
+  std::string map_phase_op_dir;
+  std::string reduce_phase_ip_dir;
+  std::string reduce_phase_out_dir;
   std::optional<std::string> output_reduce_path_{std::nullopt};
 };
 } // namespace mr

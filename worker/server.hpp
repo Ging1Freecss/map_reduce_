@@ -73,16 +73,18 @@ public:
 private:
   explicit WorkerServer(std::string coordinator_endpoint,
                         std::string listen_address, std::string advertised_host,
-                        std::size_t num_threads);
+                        std::size_t num_threads,
+                        std::string work_dir = "/var/tmp/mr_worker");
 
 public:
   static auto create(std::string coordinator_endpoint,
                      std::string listen_address, std::string advertised_host,
-                     std::size_t num_threads = 4)
+                     std::size_t num_threads = 4,
+                     std::string work_dir = "/var/tmp/mr_worker")
       -> std::shared_ptr<WorkerServer> {
     auto server = std::shared_ptr<WorkerServer>(new WorkerServer(
         std::move(coordinator_endpoint), std::move(listen_address),
-        std::move(advertised_host), num_threads));
+        std::move(advertised_host), num_threads, std::move(work_dir)));
 
     server->register_handlers();
     return server;

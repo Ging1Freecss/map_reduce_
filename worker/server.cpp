@@ -54,7 +54,8 @@
 namespace mr {
 WorkerServer::WorkerServer(std::string coordinator_endpoint,
                            std::string listen_address,
-                           std::string advertised_host, std::size_t num_threads)
+                           std::string advertised_host, std::size_t num_threads,
+                           std::string work_dir)
     : coordinator_endpoint_{std::move(coordinator_endpoint)},
       listen_address_{std::move(listen_address)},
       advertised_host_(advertised_host),
@@ -67,9 +68,28 @@ WorkerServer::WorkerServer(std::string coordinator_endpoint,
       bg_work_guard_(boost::asio::make_work_guard(bg_io_context_)) {
 
   // worker initialisation
-  worker_state_.worker_id_ = "worker-" + boost::asio::ip::host_name() + "-" +
-                             std::to_string(::getpid());
+  auto colon_pos = advertised_host.rfind(':');
+  std::string port_str = (colon_pos != std::string::npos)
+                             ? advertised_host.substr(colon_pos + 1)
+                             : "";
+  if (!port_str.empty()) {
+    worker_state_.worker_id_ = "worker-" + boost::asio::ip::host_name() + "-" +
+                               port_str + "-" + std::to_string(::getpid());
+  } else {
+    worker_state_.worker_id_ = "worker-" + boost::asio::ip::host_name() + "-" +
+                               std::to_string(::getpid());
+  }
   worker_state_.advertised_host_ = advertised_host_;
+  worker_state_.InitDirectories(work_dir);
+
+  std::cout << "[Worker] Initialized Worker ID: " << worker_state_.worker_id_
+            << "\n"
+            << "         Intermediate: " << worker_state_.map_phase_op_dir
+            << "\n"
+            << "         Reduce input: " << worker_state_.reduce_phase_ip_dir
+            << "\n"
+            << "         Reduce out:   " << worker_state_.reduce_phase_out_dir
+            << "\n";
 
   grpc::ServerBuilder builder;
 

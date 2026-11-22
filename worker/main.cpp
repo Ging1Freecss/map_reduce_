@@ -7,6 +7,7 @@ int main(int argc, const char **argv) {
   std::string port = "50052";
   std::string host_ip = "127.0.0.1";
   std::size_t num_threads = 4;
+  std::string work_dir = "/var/tmp/mr_worker";
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -18,6 +19,8 @@ int main(int argc, const char **argv) {
       num_threads = std::stoul(argv[++i]);
     } else if ((arg == "-h" || arg == "--host") && i + 1 < argc) {
       host_ip = argv[++i];
+    } else if ((arg == "-w" || arg == "--workdir") && i + 1 < argc) {
+      work_dir = argv[++i];
     }
   }
 
@@ -26,11 +29,12 @@ int main(int argc, const char **argv) {
 
   std::cout << "[Worker] Coordinator target: " << coord_endpoint << "\n"
             << "[Worker] Listening on:       " << listen_address << "\n"
-            << "[Worker] Advertised host:    " << advertised_host << "\n";
+            << "[Worker] Advertised host:    " << advertised_host << "\n"
+            << "[Worker] Base work dir:      " << work_dir << "\n";
 
   try {
-    auto worker = mr::WorkerServer::create(coord_endpoint, listen_address,
-                                           advertised_host, num_threads);
+    auto worker = mr::WorkerServer::create(
+        coord_endpoint, listen_address, advertised_host, num_threads, work_dir);
     worker->run();
   } catch (const std::exception &e) {
     std::cerr << "[Worker] Fatal error: " << e.what() << "\n";

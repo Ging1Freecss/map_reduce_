@@ -3,6 +3,9 @@ import subprocess
 import time
 import os
 import sys
+import glob
+import shutil
+import struct
 
 # ANSI Colors for crystal-clear terminal visibility
 RESET = "\033[0m"
@@ -36,15 +39,12 @@ def main():
     # 1. Clean Directories
     print(f"\n{BOLD}[Step 1] Cleaning work directories...{RESET}")
     for d in [
-        "/var/tmp/mr_worker_intermediate",
-        "/var/tmp/mr_worker_reduce_input",
-        "/var/tmp/mr_worker_reduce_output",
+        "/var/tmp/mr_worker",
         "/tmp/mr_demo_test"
     ]:
+        if os.path.exists(d):
+            shutil.rmtree(d, ignore_errors=True)
         os.makedirs(d, exist_ok=True)
-        for f in os.listdir(d):
-            try: os.remove(os.path.join(d, f))
-            except: pass
 
     # 2. Prepare Input File
     print(f"{BOLD}[Step 2] Generating input data (30,000 lines)...{RESET}")
@@ -96,7 +96,12 @@ def main():
     killed_shards = []
     for _ in range(150):
         time.sleep(0.05)
-        shards = [f for f in os.listdir("/var/tmp/mr_worker_intermediate") if f.endswith(".data")]
+        # Check if Worker 2 (:50053) produced intermediate shards
+        shards = glob.glob(f"/var/tmp/mr_worker/*50053*/intermediate/*.data")
+        if not shards:
+            shards = glob.glob(f"/var/tmp/mr_worker/*{w2.pid}*/intermediate/*.data")
+        if not shards:
+            shards = glob.glob("/var/tmp/mr_worker/*/intermediate/*.data")
         if shards:
             print(f"{RED}{BOLD}💥 CRASH INJECTED!{RESET} Terminating Worker 2 (:50053)...")
             w2.kill()
@@ -104,9 +109,9 @@ def main():
             # Delete shards produced by worker 2 so reducers can never download them
             killed_shards = shards
             for f in shards:
-                try: os.remove(f"/var/tmp/mr_worker_intermediate/{f}")
+                try: os.remove(f)
                 except: pass
-            print(f"   Purged intermediate partitions from disk: {killed_shards[:3]}")
+            print(f"   Purged intermediate partitions from disk: {[os.path.basename(x) for x in killed_shards[:3]]}")
             victim_killed = True
             break
 
@@ -167,23 +172,47 @@ def main():
         print(f"   {GREEN}{s}{RESET}")
 
     # 7. Ground Truth Diff Verification
+    cluster_files = sorted(glob.glob("/var/tmp/mr_worker/*/reduce_output/mr-out-*"), key=lambda p: os.path.basename(p))
+    golden_files = sorted(glob.glob(f"{golden_dir}/mr-out-*"), key=lambda p: os.path.basename(p))
+
     cluster_sorted = "/tmp/mr_demo_test/cluster_sorted.txt"
-    os.system(f"cat /var/tmp/mr_worker_reduce_output/mr-out-* | sort > {cluster_sorted}")
+    os.system(f"cat {' '.join(cluster_files)} > {cluster_sorted}")
+    os.system(f"cat {' '.join(golden_files)} > {golden_sorted}")
 
     diff_res = subprocess.run(["diff", "-u", golden_sorted, cluster_sorted], capture_output=True, text=True)
 
     print_banner("VERIFICATION & SUMMARY", GREEN if diff_res.returncode == 0 else RED)
     if diff_res.returncode == 0:
         print(f"{GREEN}{BOLD}🎉 ALL DATA MATCHES GROUND TRUTH WITH ZERO LOSS!{RESET}")
-        print(f"Produced partitions in /var/tmp/mr_worker_reduce_output/:")
-        for f in os.listdir("/var/tmp/mr_worker_reduce_output"):
-            if f.startswith("mr-out-"):
-                size = os.path.getsize(f"/var/tmp/mr_worker_reduce_output/{f}")
-                print(f"   • {f} ({size} bytes)")
+        print(f"Produced partitions in /var/tmp/mr_worker/*/reduce_output/:")
+        for f in cluster_files:
+            size = os.path.getsize(f)
+            print(f"   • {os.path.basename(f)} ({size} bytes)")
+
+        # Decode binary records to display human-readable word counts
+        def decode_records(filepath):
+            records = []
+            if not os.path.exists(filepath): return records
+            with open(filepath, 'rb') as f: data = f.read()
+            offset = 0
+            while offset < len(data):
+                if offset + 4 > len(data): break
+                klen = struct.unpack('<I', data[offset:offset+4])[0]; offset += 4
+                if offset + klen > len(data): break
+                k = data[offset:offset+klen].decode('utf-8', errors='replace'); offset += klen
+                if offset + 4 > len(data): break
+                vlen = struct.unpack('<I', data[offset:offset+4])[0]; offset += 4
+                if offset + vlen > len(data): break
+                v = data[offset:offset+vlen].decode('utf-8', errors='replace'); offset += vlen
+                records.append((k, v))
+            return records
+
         print(f"\n{BOLD}Sample Word Counts Produced by the Cluster:{RESET}")
-        with open(cluster_sorted) as f:
-            for _ in range(5):
-                print("   " + f.readline().strip())
+        all_records = []
+        for f in cluster_files:
+            all_records.extend(decode_records(f))
+        for k, v in sorted(all_records)[:6]:
+            print(f"   {CYAN}{k:12s}{RESET} : {GREEN}{v}{RESET}")
     else:
         print(f"{RED}{BOLD}❌ Output Mismatch!{RESET}")
         print(diff_res.stdout)

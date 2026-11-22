@@ -3,6 +3,8 @@ import subprocess
 import time
 import os
 import sys
+import glob
+import shutil
 
 def print_log_summary(log_dir):
     print("\n" + "=" * 60)
@@ -60,18 +62,13 @@ def main():
     # 2. Clean Temporary Directories
     print("[1/5] Cleaning /var/tmp directories and test workspace...")
     temp_dirs = [
-        "/var/tmp/mr_worker_intermediate",
-        "/var/tmp/mr_worker_reduce_input",
-        "/var/tmp/mr_worker_reduce_output",
+        "/var/tmp/mr_worker",
         "/tmp/mr_recovery_test"
     ]
     for d in temp_dirs:
+        if os.path.exists(d):
+            shutil.rmtree(d, ignore_errors=True)
         os.makedirs(d, exist_ok=True)
-        for f in os.listdir(d):
-            p = os.path.join(d, f)
-            if os.path.isfile(p):
-                try: os.remove(p)
-                except OSError: pass
 
     # Prepare input file (multi-line to ensure clean splits)
     input_file = "/tmp/mr_recovery_test/test_input.txt"
@@ -92,8 +89,9 @@ def main():
         print(res_seq.stderr)
         sys.exit(1)
 
+    golden_files = sorted(glob.glob(f"{golden_dir}/mr-out-*"), key=lambda p: os.path.basename(p))
     golden_sorted = "/tmp/mr_recovery_test/golden_sorted.txt"
-    os.system(f"cat {golden_dir}/mr-out-* | sort > {golden_sorted}")
+    os.system(f"cat {' '.join(golden_files)} > {golden_sorted}")
 
     # 4. Start Coordinator and Initial 2 Workers (50052, 50053)
     print("[3/5] Starting Coordinator and initial Workers 1 & 2...")
@@ -126,11 +124,20 @@ def main():
     for _ in range(100):
         time.sleep(0.05)
         # Once Worker 2 finishes at least one map task, kill Worker 2 so its port goes down!
-        if os.path.exists("/var/tmp/mr_worker_intermediate/mr-1_0.data"):
+        shards = glob.glob("/var/tmp/mr_worker/*50053*/intermediate/*.data")
+        if not shards:
+            shards = glob.glob(f"/var/tmp/mr_worker/*{w2.pid}*/intermediate/*.data")
+        if not shards:
+            shards = glob.glob("/var/tmp/mr_worker/*/intermediate/*.data")
+        if shards:
             time.sleep(0.05)
             print("       -> 💥 FAULT INJECTED: Terminating Worker 2 (:50053) to simulate peer crash!")
             w2.kill()
             w2.wait()
+            # Also purge Worker 2's intermediate shards from disk so peer fetch fails
+            for f in shards:
+                try: os.remove(f)
+                except OSError: pass
             break
 
     # Spawn Worker 3 as the spare worker to pick up recomputed tasks
@@ -155,14 +162,14 @@ def main():
     coord_log.close(); w1_log.close(); w2_log.close(); w3_log.close()
 
     # 6. Verify Output
-    cluster_out_files = [f for f in os.listdir("/var/tmp/mr_worker_reduce_output") if f.startswith("mr-out-")]
+    cluster_out_files = sorted(glob.glob("/var/tmp/mr_worker/*/reduce_output/mr-out-*"), key=lambda p: os.path.basename(p))
     if not cluster_out_files:
-        print("\n❌ TEST FAILED: No output files produced in /var/tmp/mr_worker_reduce_output!")
+        print("\n❌ TEST FAILED: No output files produced in /var/tmp/mr_worker/*/reduce_output!")
         print_log_summary(log_dir)
         sys.exit(1)
 
     cluster_sorted = "/tmp/mr_recovery_test/cluster_sorted.txt"
-    os.system(f"cat /var/tmp/mr_worker_reduce_output/mr-out-* | sort > {cluster_sorted}")
+    os.system(f"cat {' '.join(cluster_out_files)} > {cluster_sorted}")
 
     diff_res = subprocess.run(["diff", "-u", golden_sorted, cluster_sorted], capture_output=True, text=True)
 

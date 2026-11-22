@@ -6,8 +6,28 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <unistd.h>
 
 namespace mr {
+WorkerState::WorkerState() { InitDirectories(); }
+
+void WorkerState::InitDirectories(const std::string &base_dir) {
+  if (worker_id_.empty()) {
+    worker_id_ = "worker-" + std::to_string(::getpid());
+  }
+  map_phase_op_dir =
+      (std::filesystem::path(base_dir) / worker_id_ / "intermediate").string();
+  reduce_phase_ip_dir =
+      (std::filesystem::path(base_dir) / worker_id_ / "reduce_input").string();
+  reduce_phase_out_dir =
+      (std::filesystem::path(base_dir) / worker_id_ / "reduce_output").string();
+
+  std::error_code ec;
+  std::filesystem::create_directories(map_phase_op_dir, ec);
+  std::filesystem::create_directories(reduce_phase_ip_dir, ec);
+  std::filesystem::create_directories(reduce_phase_out_dir, ec);
+}
+
 auto WorkerState::ExecuteMapTask() -> std::optional<wc::CompleteRequest> {
 
   if (!task_assignment_) {
