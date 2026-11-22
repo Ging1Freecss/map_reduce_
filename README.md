@@ -272,22 +272,89 @@ sequenceDiagram
 ## Prerequisites & Build Guide
 
 ### Prerequisites
-- **Linux** (tested on Ubuntu 22.04 / 24.04, WSL2)
-- **C++20 Compiler**: GCC 13+ or Clang 16+
-- **CMake**: >= 3.25
-- **Dependencies**: Boost (>= 1.82), gRPC, Protocol Buffers, `asio-grpc` (via vcpkg)
+- **Linux** (tested on Ubuntu 22.04 / 24.04, Debian, WSL2)
+- **C++23 Compiler**: Clang 16+ (recommended) or GCC 13+
+- **Build Tools**: CMake (>= 3.25), Ninja (`ninja-build`), LLVM Linker (`lld`)
+- **Package Manager**: [vcpkg](https://github.com/microsoft/vcpkg) for automated C++ dependency management
 
-### Building from Source
+---
+
+### Step 1: Install & Bootstrap vcpkg
+
+If you do not already have `vcpkg` installed on your machine:
 
 ```bash
-# 1. Configure the build directory
-cmake --preset ninja-vcpkg-release
-# or standard cmake:
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
+~/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+```
 
-# 2. Compile the binaries
+---
+
+### Step 2: Configure vcpkg for `CMakePresets.json`
+
+This project uses **vcpkg Manifest Mode** ([vcpkg.json](file:///home/hp/Projects/map_reduce/vcpkg.json)). All required libraries (`grpc`, `protobuf`, `asio-grpc`, `boost-asio`, `gtest`) are automatically resolved and compiled upon CMake configuration.
+
+The [CMakePresets.json](file:///home/hp/Projects/map_reduce/CMakePresets.json) file relies on the `VCPKG_ROOT` path to locate the vcpkg toolchain (`$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake`).
+
+Configure your `VCPKG_ROOT` using one of the options below:
+
+#### Option A: Set Environment Variable (Recommended)
+Set `VCPKG_ROOT` in your shell (add to `~/.bashrc` or `~/.zshrc` for persistence):
+```bash
+export VCPKG_ROOT=$HOME/vcpkg
+```
+
+#### Option B: Local User Preset (`CMakeUserPresets.json`)
+Create a `CMakeUserPresets.json` in the root of the repository (already git-ignored). It inherits the base `clang` configuration while specifying your machine's exact vcpkg path:
+```json
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "clang-local",
+      "inherits": "clang",
+      "environment": {
+        "VCPKG_ROOT": "/path/to/your/vcpkg"
+      }
+    }
+  ]
+}
+```
+
+#### Option C: Direct Preset Edit
+Modify the `"VCPKG_ROOT"` field directly inside [CMakePresets.json](file:///home/hp/Projects/map_reduce/CMakePresets.json):
+```json
+"environment": {
+  "VCPKG_ROOT": "/path/to/your/vcpkg"
+}
+```
+
+---
+
+### Step 3: Building from Source
+
+Once `VCPKG_ROOT` is configured, build with CMake presets:
+
+```bash
+# 1. Configure project (vcpkg automatically downloads & compiles manifest dependencies)
+cmake --preset clang
+
+# 2. Compile all targets with Ninja & Clang
+cmake --build --preset clang
+# or directly:
 cmake --build build -j$(nproc)
 ```
+
+> **Manual CMake Option (without presets)**:
+> ```bash
+> cmake -B build -G Ninja \
+>   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+>   -DCMAKE_CXX_COMPILER=clang++ \
+>   -DCMAKE_C_COMPILER=clang \
+>   -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+>
+> cmake --build build -j$(nproc)
+> ```
 
 Target binaries will be generated in:
 - `./build/coordinator/coordinator`
