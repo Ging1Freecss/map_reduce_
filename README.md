@@ -79,22 +79,26 @@ The framework coordinates data sharing across two distinct phases without interm
 In the Map phase, the raw input file resides on the Coordinator host. Instead of transferring the entire dataset or requiring a shared network drive (NFS/HDFS), the Coordinator acts as a streaming split server (`FetchInputSplit` RPC):
 
 ```mermaid
-flowchart LR
-    subgraph Master ["Coordinator Node"]
-        Disk["Input File on Disk"] -->|Seek offset, Read 64KB| Producer["Disk Strand Producer<br/>(thread_pool_)"]
-        Producer -->|async_send| Channel["concurrent_channel<br/>(4MB buffer)"]
-        Channel -->|async_receive| Streamer["gRPC Server Streamer<br/>(data_grpc_context_)"]
+flowchart TD
+    subgraph CoordinatorNode ["1. Coordinator: Input Split Streaming Server"]
+        direction LR
+        Disk["📄 Input File on Disk<br/>(Seek offset & newline-aligned)"]
+        --> Producer["⚙️ Disk Strand Producer<br/>(thread_pool_ reads 64KB)"]
+        --> Channel["📦 concurrent_channel<br/>(4MB bounded buffer)"]
+        --> Streamer["📡 gRPC Server Streamer<br/>(FetchInputSplit RPC)"]
     end
 
-    Streamer -->|gRPC Stream: FetchInputSplit| WorkerNet["gRPC Client Reader<br/>(agrpc::ClientRPC)"]
-
-    subgraph MapWorker ["Map Worker Node"]
-        WorkerNet -->|async_send| WChannel["concurrent_channel<br/>(4MB buffer)"]
-        WChannel -->|async_receive| DiskWriter["Disk Strand Writer<br/>(thread_pool_)"]
-        DiskWriter --> LocalSplit["Local Staged File:<br/>*.map_data.{task_id}"]
-        LocalSplit --> Mapper["WordCountMapper Execution<br/>(Hash Partitioning)"]
-        Mapper --> InterFiles["Intermediate Shards:<br/>mr-{map}_{reduce}.data"]
+    subgraph WorkerNode ["2. Map Worker: Staging, Execution & Partitioning"]
+        direction LR
+        WorkerNet["📥 gRPC Client Reader<br/>(agrpc::ClientRPC stream)"]
+        --> WChannel["📦 concurrent_channel<br/>(4MB bounded buffer)"]
+        --> DiskWriter["💾 Disk Strand Writer<br/>(thread_pool_ staging)"]
+        --> LocalSplit["📝 Staged Split File<br/>(*.map_data.{task_id})"]
+        --> Mapper["⚡ WordCountMapper<br/>(Hash Partitioning)"]
+        --> InterFiles["🗂️ Intermediate Shards<br/>(mr-{M}_{R}.data)"]
     end
+
+    CoordinatorNode ==>|gRPC Network Stream (64KB chunks)| WorkerNode
 ```
 
 - **Line-Aligned Splitting**: The Coordinator's `generate_text_splits()` scans the raw input file and calculates split boundaries aligned strictly to newline (`\n`) characters (~64 MB target), ensuring no individual words or records are truncated across split boundaries.
@@ -109,32 +113,28 @@ flowchart LR
 In the Reduce phase, workers do **not** route data through the Coordinator. Instead, intermediate partition files are fetched directly peer-to-peer between workers via `WorkerShuffleService`:
 
 ```mermaid
-flowchart LR
-    subgraph Manifest ["1. Manifest Retrieval"]
-        Coord["Coordinator"] -->|TaskAssignment with<br/>intermediate_paths| Reducer["Reducer Worker"]
+flowchart TD
+    subgraph Acquisition ["1. Shard Acquisition (Collocated Zero-Copy vs Remote P2P Shuffle)"]
+        direction LR
+        Manifest["📋 TaskAssignment Manifest<br/>(Intermediate URIs)"]
+        --> Reducer["🧑‍💻 Reducer Worker"]
+        
+        Reducer -->|Collocated Host| HardLink["⚡ Atomic Hard-Link<br/>(map_dir ➔ reduce_dir)"]
+        Reducer -->|Remote Peer| P2P["🌐 FetchPartition RPC<br/>(10s Fail-Fast Deadline)"]
+        
+        HardLink --> ShardFiles["📁 Local Shards Assembled<br/>(reduce_phase_ip_dir)"]
+        P2P --> ShardFiles
     end
 
-    subgraph Routing ["2. Route Decision"]
-        Reducer --> Check{"Shard Collocated<br/>on Same Host?"}
+    subgraph Processing ["2. External Sort, Stream Merge & Atomic Commit"]
+        direction LR
+        InPlaceSort["🔄 In-Place File Sort<br/>(StreamingValueIterator)"]
+        --> HeapMerge["📊 K-Way Min-Heap Merge<br/>(Monotonic Key Stream)"]
+        --> ReducerExec["⚡ WordCountReducer<br/>(Key Aggregation)"]
+        --> CommitOut["✅ Atomic Stage & Commit<br/>(mr-out-{reduce_id})"]
     end
 
-    subgraph Collocated ["3. Local Zero-Network Path"]
-        Check -->|Yes: peer_endpoint == self| HardLink["Atomic Hard-Link<br/>map_dir ➔ reduce_dir"]
-        HardLink --> LocalInput["Local Reduce Input File"]
-    end
-
-    subgraph RemoteP2P ["4. Remote P2P Streaming Path"]
-        Check -->|No: Remote Worker| P2P["FetchPartition RPC<br/>(10s Fail-Fast Deadline)"]
-        P2P --> PeerService["Remote WorkerShuffleService<br/>(Stream mr-{M}_{R}.data)"]
-        PeerService --> StreamBack["Stream 64KB Chunks<br/>over Network"]
-        StreamBack --> LocalInput
-    end
-
-    subgraph Execution ["5. Merge & Reduction"]
-        LocalInput --> InPlaceSort["StreamingValueIterator<br/>In-Place File Sort"]
-        InPlaceSort --> HeapMerge["K-Way Min-Heap Merge<br/>Monotonic Key Stream"]
-        HeapMerge --> ReducerExec["WordCountReducer<br/>Commit mr-out-{R}"]
-    end
+    Acquisition ==>|All intermediate shards assembled on disk| Processing
 ```
 
 - **Manifest Distribution**: The Coordinator assembles the exact intermediate URIs (`<ip>:<port>/mr-<map>_<reduce>.data`) matching the Reducer's assigned partition ID ($R$) and passes them in `TaskAssignment::intermediate_paths`.
